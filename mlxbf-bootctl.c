@@ -84,6 +84,7 @@ void die(const char* fmt, ...)
 #define EXT_CSD_CMD_SET_NORMAL		(1<<0)
 #define EXT_CSD_BOOT_BUS_WIDTH		177	/* R/W */
 #define EXT_CSD_PART_CONFIG		179	/* R/W */
+#define EXT_CSD_BOOT_SIZE_MULT		226	/* R/W */
 
 /* BOOT_BUS_WIDTH register definition. */
 #define EXT_CSD_BOOT_BUS_WIDTH_MASK_ALL	0x7
@@ -92,6 +93,7 @@ void die(const char* fmt, ...)
 #define EXT_CSD_BOOT_BUS_WIDTH_X8	0x6
 
 /* Program constants */
+#define EMMC_MIN_BOOT_SIZE 0x20000
 #define EMMC_BLOCK_SIZE 512
 #define SYS_PATH "/sys/bus/platform/drivers/mlx-bootctl"
 #define SECOND_RESET_ACTION_PATH SYS_PATH "/second_reset_action"
@@ -163,6 +165,17 @@ void set_boot_partition(int part)
   };
 
   mmc_command(&idata);
+}
+
+/* Get the boot partition size */
+uint64_t get_boot_partition_size(void)
+{
+  uint64_t part_size;
+  uint8_t *ext_csd = get_ext_csd();
+  part_size = (ext_csd[EXT_CSD_BOOT_SIZE_MULT]) *
+                  EMMC_MIN_BOOT_SIZE;
+
+  return part_size;
 }
 
 /* Return the current boot bus width. */
@@ -369,7 +382,13 @@ uint64_t get_segment_length(uint64_t segheader)
   return length;
 }
 
-void read_bootstream(const char *bootstream, const char *bootfile)
+bool validate_seg_header(uint64_t segheader)
+{
+  return (((segheader >> 29) & 0xfff8UL) == BOOT_FIFO_ADDR);
+}
+
+void read_bootstream(const char *bootstream, const char *bootfile,
+                     uint64_t part_size)
 {
   // Copy the contents of the bootfile device to a bootstream
   printf("Copy bootstream from %s to %s\n", bootfile, bootstream);
@@ -387,14 +406,19 @@ void read_bootstream(const char *bootstream, const char *bootfile)
   uint64_t header;
   // Read and discard the header word
   read_or_die(bootfile, ifd, &header, sizeof(header));
-  uint64_t segheader = 0;
+  uint64_t segheader = 0, total_size = 0;
+
   while (!(segheader & SEGMENT_IS_END))
   {
-    uint64_t seg_size;
     read_or_die(bootfile, ifd, &segheader, sizeof(segheader));
-    seg_size = get_segment_length(segheader);
+    if (!validate_seg_header(segheader))
+      die("Invalid segment header");
+    uint64_t seg_size = get_segment_length(segheader);
     read_or_die(bootfile, ifd, buf, seg_size);
     write_or_die(bootstream, ofd, buf, seg_size);
+    total_size += seg_size;
+    if (total_size > part_size)
+      die("No valid bfb present");
   }
 
   if (close(ifd) < 0)
@@ -633,7 +657,8 @@ int main(int argc, char **argv)
   {
     if (input_file)
     {
-      read_bootstream(bootstream, input_file);
+      uint64_t boot_part_size = get_boot_partition_size();
+      read_bootstream(bootstream, input_file, boot_part_size);
     }
     else if (output_file)
     {
@@ -642,6 +667,13 @@ int main(int argc, char **argv)
     }
     else
     {
+      // Make sure the file will fit inside the boot partition
+      uint64_t boot_part_size = get_boot_partition_size();
+      struct stat st;
+      stat(bootstream, &st);
+      if (st.st_size > boot_part_size)
+        die("Size of bootstream exceeds boot partition size");
+
       // Get the active partition and write to the appropriate *bootN file
       // Must save/restore boot partition, which I/O otherwise resets to zero.
       int boot_part = get_boot_partition();
