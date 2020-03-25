@@ -1,6 +1,7 @@
 Name: mlxbf-bootctl
 Version: 1.0
-Release: 1%{?dist}
+%{!?_release: %define _release 2}
+Release: %{_release}%{?dist}
 Summary: Mellanox BlueField boot partition management utility
 
 License: GPLv2 or BSD

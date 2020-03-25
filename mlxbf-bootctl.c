@@ -41,6 +41,7 @@
 #include <sys/fcntl.h>
 #include <sys/ioctl.h>
 #include <sys/stat.h>
+#include <linux/limits.h>
 #include <linux/major.h>
 
 /* Boot FIFO constants */
@@ -82,8 +83,12 @@ void die(const char* fmt, ...)
 #define MMC_CMD_ADTC	(1 << 5)
 #define MMC_SWITCH_MODE_WRITE_BYTE	0x03	/* Set target to value */
 #define EXT_CSD_CMD_SET_NORMAL		(1<<0)
+
+/* EXT_CSD register offset. */
+#define EXT_CSD_RST_N			162	/* R/W */
 #define EXT_CSD_BOOT_BUS_WIDTH		177	/* R/W */
 #define EXT_CSD_PART_CONFIG		179	/* R/W */
+#define EXT_CSD_BOOT_SIZE_MULT		226	/* R/W */
 
 /* BOOT_BUS_WIDTH register definition. */
 #define EXT_CSD_BOOT_BUS_WIDTH_MASK_ALL	0x7
@@ -91,13 +96,20 @@ void die(const char* fmt, ...)
 #define EXT_CSD_BOOT_BUS_WIDTH_RESET_MASK	0x4
 #define EXT_CSD_BOOT_BUS_WIDTH_X8	0x6
 
+/* EXT_CSD_RST_N register definition. */
+#define EXT_CSD_RST_N_MASK		0x3
+#define EXT_CSD_RST_N_ENABLE		0x1
+
 /* Program constants */
+#define EMMC_MIN_BOOT_SIZE 0x20000
 #define EMMC_BLOCK_SIZE 512
-#define SYS_PATH "/sys/bus/platform/drivers/mlx-bootctl"
-#define SECOND_RESET_ACTION_PATH SYS_PATH "/second_reset_action"
-#define POST_RESET_WDOG_PATH SYS_PATH "/post_reset_wdog"
-#define LIFECYCLE_STATE_PATH SYS_PATH "/lifecycle_state"
-#define SECURE_BOOT_FUSE_STATE_PATH SYS_PATH "/secure_boot_fuse_state"
+
+#define SYS_PATH1 "/sys/bus/platform/drivers/mlx-bootctl"
+#define SYS_PATH2 "/sys/bus/platform/devices/MLNXBF04:00"
+#define SECOND_RESET_ACTION_PATH "second_reset_action"
+#define POST_RESET_WDOG_PATH "post_reset_wdog"
+#define LIFECYCLE_STATE_PATH "lifecycle_state"
+#define SECURE_BOOT_FUSE_STATE_PATH "secure_boot_fuse_state"
 
 /* Program variables */
 const char *mmc_path = "/dev/mmcblk0";
@@ -165,6 +177,17 @@ void set_boot_partition(int part)
   mmc_command(&idata);
 }
 
+/* Get the boot partition size */
+uint64_t get_boot_partition_size(void)
+{
+  uint64_t part_size;
+  uint8_t *ext_csd = get_ext_csd();
+  part_size = (ext_csd[EXT_CSD_BOOT_SIZE_MULT]) *
+                  EMMC_MIN_BOOT_SIZE;
+
+  return part_size;
+}
+
 /* Return the current boot bus width. */
 int get_boot_bus_width(void)
 {
@@ -191,11 +214,45 @@ void set_boot_bus_width(void)
   mmc_command(&idata);
 }
 
+void enable_rst_n(void)
+{
+  uint8_t *ext_csd = get_ext_csd();
+  int value = (ext_csd[EXT_CSD_RST_N] & ~EXT_CSD_RST_N_MASK) |
+    EXT_CSD_RST_N_ENABLE;
+  struct mmc_ioc_cmd idata = {
+    .write_flag = 1,
+    .opcode = MMC_SWITCH,
+    .arg = ((MMC_SWITCH_MODE_WRITE_BYTE << 24) |
+            (EXT_CSD_RST_N << 16) |
+            (value << 8) |
+            EXT_CSD_CMD_SET_NORMAL),
+    .flags = MMC_RSP_SPI_R1B | MMC_RSP_R1B | MMC_CMD_AC
+  };
+
+  mmc_command(&idata);
+}
+
+FILE *open_sysfs(const char *name, const char *attr)
+{
+  FILE *f;
+  char path[PATH_MAX];
+
+  sprintf(path, "%s/%s", SYS_PATH1, name);
+  f = fopen(path, attr);
+  if (f == NULL) {
+    sprintf(path, "%s/%s", SYS_PATH2, name);
+    f = fopen(path, attr);
+  }
+
+  if (f == NULL)
+    die("%s: %m", name);
+
+  return f;
+}
+
 int get_watchdog(void)
 {
-  FILE *f = fopen(POST_RESET_WDOG_PATH, "r");
-  if (f == NULL)
-    die("%s: %m", POST_RESET_WDOG_PATH);
+  FILE *f = open_sysfs(POST_RESET_WDOG_PATH, "r");
   int watchdog;
   if (fscanf(f, "%d", &watchdog) != 1)
     die("%s: failed to read integer", POST_RESET_WDOG_PATH);
@@ -205,9 +262,7 @@ int get_watchdog(void)
 
 void set_watchdog(int interval)
 {
-  FILE *f = fopen(POST_RESET_WDOG_PATH, "w");
-  if (f == NULL)
-    die("%s: %m", POST_RESET_WDOG_PATH);
+  FILE *f = open_sysfs(POST_RESET_WDOG_PATH, "w");
   if (fprintf(f, "%d\n", interval) < 0)
     die("%s: failed to set watchdog to '%d'", POST_RESET_WDOG_PATH, interval);
   fclose(f);
@@ -215,9 +270,7 @@ void set_watchdog(int interval)
 
 void set_second_reset_action(const char *action)
 {
-  FILE *f = fopen(SECOND_RESET_ACTION_PATH, "w");
-  if (f == NULL)
-    die("%s: %m", SECOND_RESET_ACTION_PATH);
+  FILE *f = open_sysfs(SECOND_RESET_ACTION_PATH, "w");
   if (fprintf(f, "%s\n", action) < 0)
     die("%s: failed to set action to '%s'", SECOND_RESET_ACTION_PATH, action);
   fclose(f);
@@ -226,12 +279,10 @@ void set_second_reset_action(const char *action)
 // Return the (malloced) string describing the lifecycle state (w line return)
 char *get_lifecycle_state(void)
 {
-  FILE *f = fopen(LIFECYCLE_STATE_PATH, "r");
+  FILE *f = open_sysfs(LIFECYCLE_STATE_PATH, "r");
   char *buf = NULL;
   size_t len = 0;
 
-  if (f == NULL)
-    die("%s: %m", LIFECYCLE_STATE_PATH);
   if (getline(&buf, &len, f) == -1)
     die("%s: failed to get lifecycle state", LIFECYCLE_STATE_PATH);
   fclose(f);
@@ -243,17 +294,17 @@ char *get_lifecycle_state(void)
 int get_free_sbfuse_slots(void)
 {
   int free_slot = 0;
-  FILE *f = fopen(SECURE_BOOT_FUSE_STATE_PATH, "r");
-  char *buf = NULL;
+  FILE *f = open_sysfs(SECURE_BOOT_FUSE_STATE_PATH, "r");
+  char *buf = NULL, *p;
   size_t len = 0;
-
-  if (f == NULL)
-    die("%s: %m", SECURE_BOOT_FUSE_STATE_PATH);
 
   while (getline(&buf, &len, f) != -1)
   {
-    if (strstr(buf, "Free") != NULL)
+    p = buf;
+    while ((p = strstr(p, "Free")) != NULL) {
       free_slot++;
+      p += strlen("Free");
+    }
   }
   free(buf);
   fclose(f);
@@ -369,7 +420,13 @@ uint64_t get_segment_length(uint64_t segheader)
   return length;
 }
 
-void read_bootstream(const char *bootstream, const char *bootfile)
+bool validate_seg_header(uint64_t segheader)
+{
+  return (((segheader >> 29) & 0xfff8UL) == BOOT_FIFO_ADDR);
+}
+
+void read_bootstream(const char *bootstream, const char *bootfile,
+                     uint64_t part_size)
 {
   // Copy the contents of the bootfile device to a bootstream
   printf("Copy bootstream from %s to %s\n", bootfile, bootstream);
@@ -387,14 +444,19 @@ void read_bootstream(const char *bootstream, const char *bootfile)
   uint64_t header;
   // Read and discard the header word
   read_or_die(bootfile, ifd, &header, sizeof(header));
-  uint64_t segheader = 0;
+  uint64_t segheader = 0, total_size = 0;
+
   while (!(segheader & SEGMENT_IS_END))
   {
-    uint64_t seg_size;
     read_or_die(bootfile, ifd, &segheader, sizeof(segheader));
-    seg_size = get_segment_length(segheader);
+    if (!validate_seg_header(segheader))
+      die("Invalid segment header");
+    uint64_t seg_size = get_segment_length(segheader);
     read_or_die(bootfile, ifd, buf, seg_size);
     write_or_die(bootstream, ofd, buf, seg_size);
+    total_size += seg_size;
+    if (total_size > part_size)
+      die("No valid bfb present");
   }
 
   if (close(ifd) < 0)
@@ -412,7 +474,9 @@ void write_bootstream(const char *bootstream, const char *bootfile, int flags)
   // Reset the force_ro setting if need be
   if (strncmp(bootfile, "/dev/", 5) == 0)
   {
-    asprintf(&sysname, "/sys/block/%s/force_ro", &bootfile[5]);
+    if (asprintf(&sysname, "/sys/block/%s/force_ro", &bootfile[5]) <= 0)
+      die("unexpected failure in asprintf (%s/%d)", __FILE__, __LINE__);
+
     sysfd = open(sysname, O_RDWR | O_SYNC);
     if (sysfd >= 0)
     {
@@ -561,7 +625,7 @@ int main(int argc, char **argv)
     { "help", no_argument, NULL, 'h' },
     { NULL, 0, NULL, 0 }
   };
-  static const char short_options[] = "sb:d:o:r:h";
+  static const char short_options[] = "sb:d:o:r:he";
   static const char help_text[] =
     "syntax: mlxbf-bootctl [--help|-h] [--swap|-s] [--device|-d MMCFILE]\n"
     "                      [--output|-o OUTPUT] [--read|-r INPUT]\n"
@@ -616,6 +680,10 @@ int main(int argc, char **argv)
       input_file = optarg;
       break;
 
+    case 'e':
+      enable_rst_n();
+      break;
+
     case 'h':
     default:
       die(help_text);
@@ -633,7 +701,8 @@ int main(int argc, char **argv)
   {
     if (input_file)
     {
-      read_bootstream(bootstream, input_file);
+      uint64_t boot_part_size = get_boot_partition_size();
+      read_bootstream(bootstream, input_file, boot_part_size);
     }
     else if (output_file)
     {
@@ -642,11 +711,20 @@ int main(int argc, char **argv)
     }
     else
     {
+      // Make sure the file will fit inside the boot partition
+      uint64_t boot_part_size = get_boot_partition_size();
+      struct stat st;
+      stat(bootstream, &st);
+      if (st.st_size > boot_part_size)
+        die("Size of bootstream exceeds boot partition size");
+
       // Get the active partition and write to the appropriate *bootN file
       // Must save/restore boot partition, which I/O otherwise resets to zero.
       int boot_part = get_boot_partition();
       char *bootfile;
-      asprintf(&bootfile, "%sboot%d", mmc_path, boot_part ^ which_boot);
+      if (asprintf(&bootfile, "%sboot%d", mmc_path, boot_part ^ which_boot) <= 0)
+        die("unexpected failure in asprintf (%s/%d)", __FILE__, __LINE__);
+
       write_bootstream(bootstream, bootfile, O_SYNC);
       // The eMMC driver works in an asynchronous way, thus any commands sent
       // should occur after the write to the bootstream has retired. Otherwise
@@ -657,6 +735,7 @@ int main(int argc, char **argv)
       sleep(1);
       set_boot_partition(boot_part);
       set_boot_bus_width();
+      enable_rst_n();
     }
   }
 
@@ -672,6 +751,7 @@ int main(int argc, char **argv)
       die("watchdog-swap argument ('%s') must be an integer", watchdog_swap);
     set_watchdog(watchdog);
     set_second_reset_action("swap_emmc");
+    enable_rst_n();
   }
 
   if (watchdog_disable)
