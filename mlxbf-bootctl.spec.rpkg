@@ -1,6 +1,7 @@
 Name: {{{ git_dir_name }}}
 Version: {{{ git_dir_version lead=1 }}}
-Release: 1%{?dist}
+%{!?_release: %define _release 2}
+Release: %{_release}%{?dist}
 Summary: Mellanox BlueField boot partition management utility
 
 License: BSD
