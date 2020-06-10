@@ -154,7 +154,7 @@ int get_boot_partition(void)
   int part = ((ext_csd[EXT_CSD_PART_CONFIG] >> 3) & 0x7) - 1;
 
   /* Set part to 0 by default if it is -1 (boot disabled). */
-  if (part < 0)
+  if (part < 0 || part > 1)
     part = 0;
 
   return part;
