@@ -1,6 +1,6 @@
 Name: {{{ git_dir_name }}}
 Version: {{{ git_dir_version lead=1 }}}
-%{!?_release: %define _release 3}
+%{!?_release: %define _release 4}
 Release: %{_release}%{?dist}
 Summary: Mellanox BlueField boot partition management utility
 
@@ -25,11 +25,16 @@ with the BlueField software called "mlxbf-bootctl".
 
 %install
 %make_install
+%{__install} -d %{buildroot}%{_mandir}/man8
+%{__install} -m 0644 mlxbf-bootctl.8 %{buildroot}%{_mandir}/man8
 
 %files
 %defattr(-, root, root)
 /sbin/*
-%doc mlxbf-bootctl.txt LICENSE
+%{_mandir}/man8/mlxbf-bootctl.8.gz
+
+%license LICENSE
+%doc mlxbf-bootctl.txt
 
 %changelog
 {{{ git_dir_changelog }}}
