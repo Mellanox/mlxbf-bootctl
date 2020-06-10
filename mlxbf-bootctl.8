@@ -1,0 +1,102 @@
+.TH 8 mlxbf\-bootctl "June 9, 2020" "version 1.1" "ADMINISTRATOR COMMANDS"
+.SH NAME
+mlxbf-bootctl \- control Mellanox BlueField boot partitions
+.SH SYNOPSIS
+.B mlxbf\-bootctl
+[\-h|\-\-help] [options]
+.SH DESCRIPTION
+.B mlxbf-bootctl
+is used to control the two boot firmware partitions present on most Mellanox
+BlueField devices.
+.SS Boot Partitions
+Most Bluefield devices obtain their boot firmware (ATF, UEFI, etc) from an
+on-board Embedded Multi-Media Card (eMMC). The eMMC has two partitions that
+are treated separately from the others: boot0 and boot1, one of which acts as
+the primary, the other acting as a backup. In addition, there is a watchdog
+timer present on the chip, which when activated, will automatically swap
+which boot partition is active if it is not deactivated in time. These two
+features, taken together, allow for safe BlueField firmware upgrades that may
+rolled back in case of failure.
+
+.B mlxbf-bootctl
+controls these features.
+
+If
+.B mlxbf-bootctl
+is run without options, it will print the current state of the boot partitions.
+.SH OPTIONS
+.TP
+.B
+\-\-device|\-d MMCFILE
+Use a device other than the default
+.I /dev/mmcblk0
+.TP
+.B
+\-\-bootstream|\-b BFBFILE
+Write the specified bootstream to the alternate partition of the device. This
+queries the base device (e.g.
+.I
+/dev/mmcblk0
+) for the alternate partition, and
+uses that information to open the appropriate boot partition device, e.g. the
+.I
+/dev/mmcblk0boot0
+file. BFB files that can be installed in the boot partitions are typically
+named "default.bfb" in BlueField software distributions.
+.TP
+.B
+\-\-overwrite\-current
+Used with "\-\-bootstream" to overwrite the current boot partition instead of
+the alternate one. This is not recommended as there is no easy way to recover
+if the new boot code does not bring the system up.
+.TP
+.B
+\-\-output|\-o OUTPUT
+Used with "\-\-bootstream" to specify a file to write the boot partition data
+to (creating it if necessary), rather than using an existing master device and
+deriving the boot partition device.
+.TP
+.B
+\-\-read|\-r INPUT
+Read a bootstream and convert it back to a BFBFILE specified by
+"\-\-bootstream". For example use
+
+.RS 11
+.B mlxbf-bootctl
+\-\-read /dev/mmcblk0boot0
+.sp 0
+\-\-bootstream current.bfb
+.RE
+.IP
+to read the current bfb installed on boot partition zero.
+.TP
+.B
+\-\-watchdog\-swap SECONDS
+Arrange to start the ARM watchdog with a countdown of the specified number of
+seconds until it firms; also, set the boot software so that it will swap the
+primary and alternate partitions at the next reset. Mutually exclusive with
+"\-\-nowatchdog\-swap".
+.TP
+.B
+\-\-nowatchdog-swap
+Ensure that after the next reset, no watchdog will be started, and no swapping
+of boot partitions will happen.
+.TP
+.B
+\-\-swap|\-s
+Set the boot software so that will swap the primary and alternate partitions
+at the next reset.
+.SH EXAMPLES
+To update to new firmware as safely as possible:
+.IP
+.B mlxbf-bootctl
+\-\-bootstream new.bfb \-\-watchdog\-swap 90
+.PP
+Once the new firmware is confirmed to be good, turn off watchdog swapping with
+.IP
+.B mlxbf-bootctl
+\-\-nowatchdog-swap
+.SH COMMON ISSUES
+When the watchdog timer is activated through the "\-\-watchdog\-swap" option,
+entering the UEFI menu for long enough will trigger a reboot and partition
+swap. To avoid this, run "\-\-nowatchdog\-swap" before entering the UEFI menu.
