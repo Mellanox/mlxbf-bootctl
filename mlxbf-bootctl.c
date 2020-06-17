@@ -56,6 +56,7 @@ void die(const char* fmt, ...)
   va_start(ap, fmt);
   vfprintf(stderr, fmt, ap);
   putc('\n', stderr);
+  va_end(ap);
   exit(1);
 }
 
@@ -714,7 +715,12 @@ int main(int argc, char **argv)
       // Make sure the file will fit inside the boot partition
       uint64_t boot_part_size = get_boot_partition_size();
       struct stat st;
-      stat(bootstream, &st);
+      int error;
+      error = stat(bootstream, &st);
+
+      if (error < 0)
+        die("%s: %m", bootstream);
+
       if (st.st_size > boot_part_size)
         die("Size of bootstream exceeds boot partition size");
 
