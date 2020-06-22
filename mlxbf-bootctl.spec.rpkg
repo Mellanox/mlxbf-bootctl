@@ -1,6 +1,6 @@
 Name: {{{ git_dir_name }}}
 Version: {{{ git_dir_version lead=1 }}}
-Release: 5%{?dist}
+Release: 6%{?dist}
 Summary: Mellanox BlueField boot partition management utility
 
 License: BSD
@@ -42,6 +42,10 @@ firmware.
 %doc mlxbf-bootctl.txt
 
 %changelog
+* Mon Jun 22 2020 Spencer Lingard <spencer@nvidia.com> - 1.1-6
+- Add set_build_flags macro to build step
+- Warn user if mlxbf_bootctl kernel driver is not loaded
+
 * Wed Jun 17 2020 Spencer Lingard <spencer@nvidia.com> - 1.1-5
 - Simplify release tag
 - Add comment explaining ExclusiveArch tag
