@@ -245,8 +245,14 @@ FILE *open_sysfs(const char *name, const char *attr)
     f = fopen(path, attr);
   }
 
-  if (f == NULL)
+  if (f == NULL) {
+    if (errno == ENOENT) {
+      fprintf(stderr, "cannot find required sysfs path %s\n", path);
+      die("please load mlxbf_bootctl kernel driver");
+    }
+
     die("%s: %m", name);
+  }
 
   return f;
 }
