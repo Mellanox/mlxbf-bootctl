@@ -25,6 +25,7 @@ firmware.
 {{{ git_dir_setup_macro }}}
 
 %build
+%set_build_flags
 %make_build
 
 %install
