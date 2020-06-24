@@ -112,6 +112,29 @@ void die(const char* fmt, ...)
 #define LIFECYCLE_STATE_PATH "lifecycle_state"
 #define SECURE_BOOT_FUSE_STATE_PATH "secure_boot_fuse_state"
 
+#define MMC_BOOT_PARTITION_MAX_SIZE (4 * 1024 * 1024)
+
+/*
+ * BFB image header.
+ *
+ * This definition is extracted from file
+ * atf/plat/mellanox/common/include/drivers/io/bluefield_boot.h
+ */
+#define BFB_IMGHDR_MAGIC        0x13026642  /* "Bf^B^S" */
+typedef struct {
+    unsigned long magic:32;
+    unsigned long major:4;
+    unsigned long minor:4;
+    unsigned long reserved:4;
+    unsigned long next_img_ver:4;
+    unsigned long cur_img_ver:4;
+    unsigned long hdr_len:4;
+    unsigned long image_id:8;
+    unsigned long image_len:32;
+    unsigned long image_crc:32;
+    unsigned long following_images:64;
+} boot_image_header_t;
+
 /* Program variables */
 const char *mmc_path = "/dev/mmcblk0";
 
@@ -618,6 +641,64 @@ int main(int argc, char **argv)
 
 #else
 
+static uint32_t crc32_update(uint32_t crc, uint64_t data)
+{
+  __asm__("crc32x %w0, %w0, %x1" : "+r" (crc) : "r" (data));
+  return crc;
+}
+
+static void verify_bootstream(const char *bootfile)
+{
+  int ifd, n, bytes_left, img_size;
+  boot_image_header_t hdr;
+  struct stat st;
+  uint64_t data;
+  uint32_t crc;
+
+  ifd = open(bootfile, O_RDONLY);
+  if (ifd < 0)
+    die("%s: %m", bootfile);
+
+  if (fstat(ifd, &st) < 0)
+    die("%s: stat: %m", bootfile);
+  bytes_left = st.st_size;
+  if (bytes_left % sizeof(uint64_t))
+    die("Invalid size %d", bytes_left);
+  if (bytes_left > MMC_BOOT_PARTITION_MAX_SIZE)
+    die("Boot file size too big");
+
+  while (bytes_left > 0) {
+    // Read and verify the image header.
+    n = read_or_die(bootfile, ifd, &hdr, sizeof(hdr));
+    if (n != sizeof(hdr))
+      die("Unable to read next header, n=%d", n);
+    n = hdr.hdr_len - sizeof(hdr) / sizeof(uint64_t);
+    bytes_left -= hdr.hdr_len * sizeof(uint64_t);
+    if (n < 0 || bytes_left < 0)
+      die("Invalid header length");
+    // Drain the rest of header.
+    while (n--) {
+      if (read_or_die(bootfile, ifd, &data, sizeof(data)) != sizeof(data))
+        die("Not enough data for header");
+    }
+
+    // Verify the image crc.
+    crc = ~0;
+    img_size = hdr.image_len;
+    while (img_size > 0) {
+      if (read_or_die(bootfile, ifd, &data, sizeof(data)) != sizeof(data))
+        die("Not enough data for image id %d, missing size %d", hdr.image_id, img_size);
+      crc = crc32_update(crc, data);
+      img_size -= sizeof(data);
+      bytes_left -= sizeof(data);
+    }
+    if (hdr.image_crc != ~crc)
+      die("Invalid CRC for image_id %d", hdr.image_id);
+  }
+
+  close(ifd);
+}
+
 int main(int argc, char **argv)
 {
   static struct option long_options[] = {
@@ -718,6 +799,8 @@ int main(int argc, char **argv)
     }
     else
     {
+      verify_bootstream(bootstream);
+
       // Make sure the file will fit inside the boot partition
       uint64_t boot_part_size = get_boot_partition_size();
       struct stat st;
