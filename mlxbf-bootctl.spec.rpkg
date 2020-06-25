@@ -39,7 +39,7 @@ firmware.
 %{_mandir}/man8/mlxbf-bootctl.8.gz
 
 %license LICENSE
-%doc mlxbf-bootctl.txt
+%doc README.md
 
 %changelog
 * Mon Jun 22 2020 Spencer Lingard <spencer@nvidia.com> - 1.1-6
