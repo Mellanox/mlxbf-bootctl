@@ -27,4 +27,4 @@ with the BlueField software called "mlxbf-bootctl".
 %files
 %defattr(-, root, root)
 /sbin/*
-%doc mlxbf-bootctl.txt COPYING
+%doc README.md COPYING
