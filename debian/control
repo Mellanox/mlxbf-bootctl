@@ -7,7 +7,7 @@ Standards-Version: 4.1.2
 
 Package: mlxbf-bootctl
 Architecture: any
-Depends: ${shlibs:Depends}, ${misc:Depends}, linux-bluefield
+Depends: ${shlibs:Depends}, ${misc:Depends}
 Description: Binary to manage Mellanox boot partitions
  Access to all the boot partition management is via a program shipped
  with the BlueField software called "mlxbf-bootctl".
