@@ -1,14 +1,31 @@
-Safely Upgrading Boot Software
-==============================
+mlxbf-bootctl
+=============
 
-This document describes how to use the BlueField alternate boot
-partition support feature to safely upgrade the boot software.  We
-give the requirements that motivate the feature and explain the
-software interfaces that are used to configure it.
+Background
+----------
 
+The BlueField boot flow comprises 4 main phases:
 
-The Problem
------------
+- Hardware loads ARM Trusted Firmware (ATF)
+- ATF loads Unified Extensible Firmware Interface (UEFI); together ATF
+  and UEFI make up the booter software
+- UEFI loads the operating system, such as the Linux kernel
+- The operating system loads applications and user data
+
+When booting from eMMC, these stages make use of two different types
+of storage within the eMMC part:
+
+- ATF and UEFI come from a special area known as an eMMC boot
+  partition.  Data from a boot partition is automatically streamed
+  from the eMMC device to the eMMC controller under hardware control
+  during the initial bootup.  Each eMMC device has two boot
+  partitions, and the partition that is used to stream the boot data
+  is chosen by a non-volatile configuration register in the eMMC.
+
+- The operating system, applications, and user data come from the
+  remainder of the chip, known as the user area.  This area is
+  accessed via block-size reads and writes, done by a device driver or
+  similar software routine.
 
 In most deployments, BlueField's ARM cores are expected to obtain
 their software stack from an on-board Embedded Multi-Media Card (eMMC)
@@ -53,49 +70,18 @@ In order to satisfy the requests listed above, we do the following:
   expires, the system will reboot, but the primary and backup
   partitions will first be swapped.
 
-
-Background
-----------
-
-Before explaining the implementation of the solution, we need to go
-over some background on the BlueField boot process.
-
-The BlueField boot flow comprises 4 main phases:
-
-- Hardware loads ARM Trusted Firmware (ATF)
-- ATF loads Unified Extensible Firmware Interface (UEFI); together ATF
-  and UEFI make up the booter software
-- UEFI loads the operating system, such as the Linux kernel
-- The operating system loads applications and user data
-
-When booting from eMMC, these stages make use of two different types
-of storage within the eMMC part:
-
-- ATF and UEFI come from a special area known as an eMMC boot
-  partition.  Data from a boot partition is automatically streamed
-  from the eMMC device to the eMMC controller under hardware control
-  during the initial bootup.  Each eMMC device has two boot
-  partitions, and the partition that is used to stream the boot data
-  is chosen by a non-volatile configuration register in the eMMC.
-
-- The operating system, applications, and user data come from the
-  remainder of the chip, known as the user area.  This area is
-  accessed via block-size reads and writes, done by a device driver or
-  similar software routine.
-
-
 The mlxbf-bootctl Program
--------------------
+-------------------------
 
 Access to all the boot partition management is via a program shipped
 with the BlueField software called "mlxbf-bootctl".  The binary is
 shipped as part of our Yocto image (in /sbin) and the sources are
 shipped in the "src" directory in the BlueField Runtime Distribution.
-A simple "make" command will build the utility.
+A simple `make` command will build the utility.
 
-The mlxbf-bootctl syntax is as follows, and will be explained in more detail
-in the following sections::
+The mlxbf-bootctl syntax is as follows:
 
+```
   syntax: mlxbf-bootctl [--help|-h] [--swap|-s] [--device|-d MMCFILE]
                         [--output|-o OUTPUT] [--read|-r INPUT]
                         [--bootstream|-b BFBFILE] [--overwrite-current]
@@ -119,7 +105,7 @@ in the following sections::
   --read: Read a bootstream and convert it back to a BFBFILE specified
     by --bootstream.  For example use "mlxbf-bootctl --read /dev/mmcblk0boot0
     --bootstream current.bfb" to read the current bfb installed on boot
-   partition zero.
+    partition zero.
 
   --watchdog-swap: Arrange to start the ARM watchdog with a countdown
     of the specified number of seconds until it fires; also, set the
@@ -128,7 +114,7 @@ in the following sections::
 
   --nowatchdog-swap: Ensure that after the next reset, no watchdog
     will be started, and no swapping of boot partitions will happen.
-
+```
 
 Updating the Boot Partition
 ---------------------------
@@ -136,20 +122,21 @@ Updating the Boot Partition
 To update the boot partition on the ARM cores, let us assume we have a
 new bootstream file, e.g. "bootstream.new".  We would like to install
 and validate this new bootstream.  To just update and hope for the
-best, you can do::
+best, you can do:
 
-  # mlxbf-bootctl --bootstream bootstream.new --swap
-  # reboot
+```bash
+   mlxbf-bootctl --bootstream bootstream.new --swap
+   reboot
+```
 
 This will write the new bootstream to the alternate boot partition,
 swap alternate and primary so that the new bootstream will be used on
 the next reboot, then reboot to use it.
 
-(You can also use --overwrite-current instead of --swap, which will
+(You can also use `--overwrite-current` instead of `--swap`, which will
 just overwrite your current boot partition, but this is not
 recommended as there is no easy way to recover if the new booter code
 does not bring the system up.)
-
 
 Safely Updating with a BMC
 --------------------------
@@ -165,17 +152,18 @@ cores, first setting a suitable mode bit that the ARM booter will
 respond to by switching the primary and alternate boot partitions as
 part of resetting into its original state.
 
-
 Safely Updating from the ARM Cores
 ----------------------------------
 
 Without a BMC, you can use the ARM watchdog to achieve similar
 results.  If something goes wrong on the next reboot and the system
 does not come up properly, it will reboot and return to the original
-configuration.  In this case, you might run::
+configuration.  In this case, you might run:
 
-  # mlxbf-bootctl --bootstream bootstream.new --swap --watchdog-swap 60
-  # reboot
+```bash
+  mlxbf-bootctl --bootstream bootstream.new --swap --watchdog-swap 60
+  reboot
+```
 
 With these commands, you will reboot the system, and if it hangs for
 60 seconds or more, the watchdog will fire and reset the chip, the
@@ -186,7 +174,7 @@ resets, the booter will again swap the boot partition back to the way
 it was before.
 
 You must ensure that Linux after the reboot is configured to boot up
-with the ``sbsa_gwdt`` driver enabled.  This is the SBSA (Server Base
+with the `sbsa_gwdt` driver enabled.  This is the SBSA (Server Base
 System Architecture) Generic WatchDog Timer.  As soon as the driver is
 loaded, it will start refreshing the watchdog and preventing it from
 firing, which will allow your system to finish booting up safely.  In
@@ -197,22 +185,26 @@ would then become responsible for refreshing the watchdog frequently
 enough to keep the system from rebooting.
 
 For documentation on the Linux watchdog subsystem, see the Linux
-watchdog documentation, e.g.
+watchdog documentation:
 
 https://www.kernel.org/doc/Documentation/watchdog/watchdog-api.txt
 
-For example, to disable the watchdog completely, you can run::
+For example, to disable the watchdog completely, you can run:
 
-  # echo V > /dev/watchdog
+```bash
+  echo V > /dev/watchdog
+```
 
 You can incorporate other features of the ARM generic watchdog into
 your application code using the programming API as well, if you wish.
 
 Once the system has booted up, in addition to disabling or
 reconfiguring the watchdog itself if you wish, you should also clear
-the "swap on next reset" functionality from the booter by running::
+the "swap on next reset" functionality from the booter by running:
 
-  # mlxbf-bootctl --nowatchdog-swap
+```bash
+  mlxbf-bootctl --nowatchdog-swap
+```
 
 Otherwise, next time you reset the system (via reboot, external reset,
 etc) it will assume a failure or watchdog reset occurred and swap the
@@ -220,7 +212,6 @@ eMMC boot partition automatically.
 
 The above steps can be done manually, or can be done automatically by
 software running in the newly-booted system.
-
 
 Changing the Kernel or Userspace
 --------------------------------
