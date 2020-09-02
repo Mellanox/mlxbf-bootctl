@@ -641,9 +641,16 @@ int main(int argc, char **argv)
 
 #else
 
-static uint32_t crc32_update(uint32_t crc, uint64_t data)
+static uint32_t crc32_update(uint32_t crc, uint8_t *p, unsigned int len)
 {
-  __asm__("crc32x %w0, %w0, %x1" : "+r" (crc) : "r" (data));
+  int i;
+
+  while (len--) {
+    crc ^= *p++;
+    for (i = 0; i < 8; i++)
+      crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+
   return crc;
 }
 
@@ -688,7 +695,7 @@ static void verify_bootstream(const char *bootfile)
     while (img_size > 0) {
       if (read_or_die(bootfile, ifd, &data, sizeof(data)) != sizeof(data))
         die("Not enough data for image id %d, missing size %d", hdr.image_id, img_size);
-      crc = crc32_update(crc, data);
+      crc = crc32_update(crc, (uint8_t *)&data, sizeof(data));
       img_size -= sizeof(data);
       bytes_left -= sizeof(data);
     }
