@@ -1,0 +1,3 @@
+RPMBUILD
+git_dir_pack
+*.src.rpm
