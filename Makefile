@@ -1,7 +1,10 @@
+PROJECT_NAME:=mlxbf-bootctl
 SBINDIR = /sbin
 
 # Default target.
 all:
+
+include package.mk
 
 # By default, use the Makefile's directory as the vpath.
 VPATH := $(dir $(lastword $(MAKEFILE_LIST)))
