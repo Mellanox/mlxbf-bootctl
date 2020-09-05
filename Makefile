@@ -4,7 +4,7 @@ SBINDIR = /sbin
 # Default target.
 all:
 
-include package.mk
+include $(shell dirname $(realpath $(firstword $(MAKEFILE_LIST))))/package.mk
 
 # By default, use the Makefile's directory as the vpath.
 VPATH := $(dir $(lastword $(MAKEFILE_LIST)))
