@@ -25,7 +25,7 @@ firmware.
 %setup
 
 %build
-%set_build_flags
+%{?set_build_flags}
 %make_build
 
 %install
