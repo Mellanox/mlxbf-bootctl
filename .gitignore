@@ -1,3 +1,6 @@
 RPMBUILD
 git_dir_pack
 *.src.rpm
+mlxbf-bootctl
+mlxbf-bootctl.d
+mlxbf-bootctl.o
