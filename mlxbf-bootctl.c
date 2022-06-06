@@ -50,6 +50,15 @@
 #define MAX_SEG_LEN ((1 << 20) - SEGMENT_HEADER_LEN)
 #define SEGMENT_IS_END (1UL << 63)
 
+/* File size limits */
+#define INPUT_BFB_MAX_SIZE (20 * 1024 * 1024)
+#define MMC_BOOT_PARTITION_MAX_SIZE (4 * 1024 * 1024)
+
+/* DMI constants */
+#define DMI_TABLE_PATH "/sys/firmware/dmi/tables/DMI"
+#define DMI_PROCESSOR_INFO_TYPE 4
+#define DMI_PROCESSOR_VERSION_STR_MAX_SIZE 100
+
 void die(const char* fmt, ...)
 {
   va_list ap;
@@ -59,6 +68,27 @@ void die(const char* fmt, ...)
   va_end(ap);
   exit(1);
 }
+
+/*
+ * BFB image header.
+ *
+ * This definition is extracted from file
+ * atf/plat/mellanox/common/include/drivers/io/bluefield_boot.h
+ */
+#define BFB_IMGHDR_MAGIC        0x13026642  /* "Bf^B^S" */
+typedef struct {
+    unsigned long magic:32;
+    unsigned long major:4;
+    unsigned long minor:4;
+    unsigned long reserved:4;
+    unsigned long next_img_ver:4;
+    unsigned long cur_img_ver:4;
+    unsigned long hdr_len:4;
+    unsigned long image_id:8;
+    unsigned long image_len:32;
+    unsigned long image_crc:32;
+    unsigned long following_images:64;
+} boot_image_header_t;
 
 #ifndef OUTPUT_ONLY
 
@@ -111,32 +141,6 @@ void die(const char* fmt, ...)
 #define POST_RESET_WDOG_PATH "post_reset_wdog"
 #define LIFECYCLE_STATE_PATH "lifecycle_state"
 #define SECURE_BOOT_FUSE_STATE_PATH "secure_boot_fuse_state"
-
-#define INPUT_BFB_MAX_SIZE (20 * 1024 * 1024)
-#define MMC_BOOT_PARTITION_MAX_SIZE (4 * 1024 * 1024)
-
-#define DMI_PROCESSOR_INFO_TYPE 4
-
-/*
- * BFB image header.
- *
- * This definition is extracted from file
- * atf/plat/mellanox/common/include/drivers/io/bluefield_boot.h
- */
-#define BFB_IMGHDR_MAGIC        0x13026642  /* "Bf^B^S" */
-typedef struct {
-    unsigned long magic:32;
-    unsigned long major:4;
-    unsigned long minor:4;
-    unsigned long reserved:4;
-    unsigned long next_img_ver:4;
-    unsigned long cur_img_ver:4;
-    unsigned long hdr_len:4;
-    unsigned long image_id:8;
-    unsigned long image_len:32;
-    unsigned long image_crc:32;
-    unsigned long following_images:64;
-} boot_image_header_t;
 
 /* Program variables */
 const char *mmc_path = "/dev/mmcblk0";
@@ -499,6 +503,140 @@ void read_bootstream(const char *bootstream, const char *bootfile,
   free(buf);
 }
 
+// Get the version of hardware we're currently running on.
+// If it can't be found, this will return -1.
+int get_hw_version(void) {
+  const char *dmi_file = DMI_TABLE_PATH;
+
+  int dmi_fd = open(dmi_file, O_RDONLY);
+  if (dmi_fd < 0)
+    die("%s: %m", dmi_file);
+
+  struct stat st;
+  if (fstat(dmi_fd, &st) < 0)
+    die("%s: stat: %m", dmi_file);
+
+  void *dmi_buf = malloc(st.st_size);
+  if (dmi_buf == NULL)
+    die("out of memory");
+
+  int n_bytes = 0;
+  n_bytes = read_or_die(dmi_file, dmi_fd, dmi_buf, st.st_size);
+  if (n_bytes != st.st_size)
+    die("%s: could not read DMI table", dmi_file);
+
+  if (close(dmi_fd) < 0)
+    die("%s: close: %m", dmi_file);
+
+  // Now, skip along table until we reach the processor info
+  int bytes_left = st.st_size;
+  void *idx = dmi_buf;
+  uint8_t table_size = 0;
+
+  while (bytes_left > 0) {
+    uint8_t table_type = *((uint8_t*)idx);
+    table_size = *((uint8_t*)idx + 1);
+
+    // Break if we hit the processor table.
+    if (table_type == DMI_PROCESSOR_INFO_TYPE)
+      break;
+
+    // Otherwise, skip to next table.
+    idx += table_size;
+    bytes_left -= table_size;
+    
+    bool first_str = true;
+
+    // We might need to skip over strings, too.
+    while (bytes_left > 0) {
+      // If idx is over two 0 bytes, we're at the end, so
+      // advance to the next table.
+      if (*(uint16_t*)idx == 0) {
+        idx += sizeof(uint16_t);
+        bytes_left -= sizeof(uint16_t);
+        break;
+      } else {
+        // Skip a string. Note the first iteration will
+        // place the index at the beginning of the string,
+        // whereas all further iterations place the index at
+        // the NULL terminator.
+        if (!first_str) {
+          idx++;
+          bytes_left--;
+        }
+        first_str = false;
+        while (*(char*)idx && bytes_left > 0) {
+          idx++;
+          bytes_left--;
+        }
+      }
+    }
+  }
+
+  if (bytes_left <= 0) {
+    fprintf(stderr, "warning: could not find BlueField SoC revision\n");
+    free(dmi_buf);
+    return -1;
+  }
+
+  // Now idx is at processor version table - we can read the
+  // string now. SMBIOS tables append all strings to the end
+  // of the structure, and refer to them by their order.
+  // First string is 1, second is 2, etc.
+  uint8_t soc_ver_snum = *(uint8_t*)(idx + 0x10);
+  if (soc_ver_snum == 0) {
+    fprintf(stderr, "warning: found DMI processor ver field, but it's NULL\n");
+    free(dmi_buf);
+    return -1;
+  }
+
+  idx += table_size;
+  bytes_left -= table_size;
+
+  // Skip strings until we hit the desired one.
+  char version_string[DMI_PROCESSOR_VERSION_STR_MAX_SIZE] = {0};
+  bool first_str = true;
+  while (soc_ver_snum-- > 1 && bytes_left > 0) {
+    if (*(uint16_t*)idx == 0) {
+      fprintf(stderr, "warning: DMI processor ver specifies string that does not exist.\n");
+      free(dmi_buf);
+      return -1;
+    } else {
+      if (!first_str) {
+        idx++;
+        bytes_left--;
+      }
+      first_str = false;
+      // Skip a string.
+      while (*(char*)idx && bytes_left > 0) {
+        idx++;
+        bytes_left--;
+      }
+    }
+  }
+
+  idx++;
+  bytes_left--;
+
+  // Finally, actually copy the string.
+  strncpy(
+    version_string,
+    idx,
+    bytes_left < DMI_PROCESSOR_VERSION_STR_MAX_SIZE - 1 ? bytes_left : DMI_PROCESSOR_VERSION_STR_MAX_SIZE - 1
+  );
+
+  // Extract version
+  int version = -1;
+  if (1 != sscanf(version_string, "Mellanox BlueField-%d", &version))
+    fprintf(stderr, "warning: Unknown SoC revision");
+
+  // BlueField 1 is v0, BF2 is v1, etc.
+  version--;
+
+  free(dmi_buf);
+  return version;
+}
+
 // Read a header from a boot stream. This will consume the
 // entire header, verify it, and return the header
 // structure.
@@ -656,7 +794,8 @@ void write_bootstream(const char *bootstream, const char *bootfile, int flags)
   uint8_t padbuf[8] = {0}; // There are at most 8 pad bytes.
   if (ibuf == NULL)
     die("out of memory");
-  size_t bytes_left = read_bootstream_to_buffer(bootstream, ibuf, MMC_BOOT_PARTITION_MAX_SIZE, 1);
+  int version = get_hw_version();
+  size_t bytes_left = read_bootstream_to_buffer(bootstream, ibuf, MMC_BOOT_PARTITION_MAX_SIZE, version);
   int ofd = open(bootfile, O_WRONLY | flags, 0666);
   if (ofd < 0)
     die("%s: %m", bootfile);
