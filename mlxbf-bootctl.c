@@ -660,6 +660,77 @@ size_t read_bootstream_header(const char *bootstream, int ifd, boot_image_header
     return hdr->hdr_len * sizeof(uint64_t);
 }
 
+// Correct the following_images and next_img_ver fields in a BFB buffer.
+// Note this assumes a well-formed BFB stream in the buffer.
+void correct_bootstream_headers(void *buf, int num_images) {
+  uint64_t fi_map = 0;
+  void *idx = buf;
+  boot_image_header_t *hdr;
+  int img_size = 0;
+  int pad_size = 0;
+
+  if (num_images <= 0)
+    die("%s: num_images must be at least 1", __FUNCTION__);
+
+  // Markers to find images next time
+  void **images = malloc(num_images * sizeof(void*));
+  if (images == NULL)
+    die("out of memory");
+
+  // Iterate once to build fi_map and mark image starts
+  for (int i = 0; i < num_images; i++) {
+    hdr = (boot_image_header_t*) idx;
+
+    // Build image maps
+    fi_map |= 1UL << hdr->image_id;
+    images[i] = idx;
+
+    // Skip to next image
+    img_size = hdr->image_len;
+    pad_size = (img_size % 8) ? (8 - img_size % 8) : 0;
+    idx += img_size + pad_size + hdr->hdr_len * sizeof(uint64_t);
+  }
+
+  boot_image_header_t *prev_hdr;
+
+  // Now we can iterate over the images directly and fixup
+  // the fields that need it
+  for (int i = 0; i < num_images; i++) {
+    hdr = (boot_image_header_t*) images[i];
+
+    // Update image bitmap. Note that on the last
+    // image of a series of versions, this will be wrong,
+    // and will be corrected next iteration.
+    hdr->following_images = fi_map;
+
+    if (i > 0) {
+      prev_hdr = (boot_image_header_t*) images[i-1];
+
+      if (prev_hdr->image_id == hdr->image_id) {
+        // Update next_img_ver as long as we haven't gone to
+        // a new image ID.
+        prev_hdr->next_img_ver = hdr->cur_img_ver;
+      } else {
+        // If next image ID is different, then update
+        // fi_map, and correct the previous image.
+        fi_map &= ~(1UL << prev_hdr->image_id);
+        prev_hdr->following_images = fi_map;
+
+        // We also set prev_hdr's next_img_ver to 0 since
+        // there are no more images of that version.
+        prev_hdr->next_img_ver = 0;
+      }
+    }
+  }
+
+  // Edge case: Handle last image.
+  hdr = (boot_image_header_t*)images[num_images-1];
+  hdr->following_images = 0;
+  hdr->next_img_ver = 0;
+
+  free(images);
+}
+
 // Tell whether we should write an image to the boot
 // partition, based on a version number.
 // We do this conservatively, so we don't accidentally
@@ -702,6 +773,8 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
   size_t pad_size;
   size_t img_size;
 
+  int num_images = 0;
+
   // Otherwise, we'll need to read the whole file and filter it to tell
   // whether stream will fit.
   while (bytes_left > 0) {
@@ -731,6 +804,9 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
       idx += n_bytes;
       bytes_left -= n_bytes;
 
+      // Finally, count the image. We reuse this later for
+      // fixing up the headers.
+      num_images++;
     } else {
       // Otherwise, skip over the entire image.
       n_bytes = lseek(ifd, img_size + pad_size, SEEK_CUR);
@@ -742,6 +818,8 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
 
   if (close(ifd) < 0)
     die("%s: close: %m", bootstream);
+
+  correct_bootstream_headers(buf, num_images);
 
   return idx - buf;
 }
