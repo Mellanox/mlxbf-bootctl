@@ -509,8 +509,10 @@ int get_hw_version(void) {
   const char *dmi_file = DMI_TABLE_PATH;
 
   int dmi_fd = open(dmi_file, O_RDONLY);
-  if (dmi_fd < 0)
-    die("%s: %m", dmi_file);
+  if (dmi_fd < 0) {
+    fprintf(stderr, "warn: %s: %m, disable version filtering\n", dmi_file);
+    return -1;
+  }
 
   struct stat st;
   if (fstat(dmi_fd, &st) < 0)
