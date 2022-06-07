@@ -50,6 +50,15 @@
 #define MAX_SEG_LEN ((1 << 20) - SEGMENT_HEADER_LEN)
 #define SEGMENT_IS_END (1UL << 63)
 
+/* File size limits */
+#define INPUT_BFB_MAX_SIZE (20 * 1024 * 1024)
+#define MMC_BOOT_PARTITION_MAX_SIZE (4 * 1024 * 1024)
+
+/* DMI constants */
+#define DMI_TABLE_PATH "/sys/firmware/dmi/tables/DMI"
+#define DMI_PROCESSOR_INFO_TYPE 4
+#define DMI_PROCESSOR_VERSION_STR_MAX_SIZE 100
+
 void die(const char* fmt, ...)
 {
   va_list ap;
@@ -59,6 +68,27 @@ void die(const char* fmt, ...)
   va_end(ap);
   exit(1);
 }
+
+/*
+ * BFB image header.
+ *
+ * This definition is extracted from file
+ * atf/plat/mellanox/common/include/drivers/io/bluefield_boot.h
+ */
+#define BFB_IMGHDR_MAGIC        0x13026642  /* "Bf^B^S" */
+typedef struct {
+    unsigned long magic:32;
+    unsigned long major:4;
+    unsigned long minor:4;
+    unsigned long reserved:4;
+    unsigned long next_img_ver:4;
+    unsigned long cur_img_ver:4;
+    unsigned long hdr_len:4;
+    unsigned long image_id:8;
+    unsigned long image_len:32;
+    unsigned long image_crc:32;
+    unsigned long following_images:64;
+} boot_image_header_t;
 
 #ifndef OUTPUT_ONLY
 
@@ -111,29 +141,6 @@ void die(const char* fmt, ...)
 #define POST_RESET_WDOG_PATH "post_reset_wdog"
 #define LIFECYCLE_STATE_PATH "lifecycle_state"
 #define SECURE_BOOT_FUSE_STATE_PATH "secure_boot_fuse_state"
-
-#define MMC_BOOT_PARTITION_MAX_SIZE (4 * 1024 * 1024)
-
-/*
- * BFB image header.
- *
- * This definition is extracted from file
- * atf/plat/mellanox/common/include/drivers/io/bluefield_boot.h
- */
-#define BFB_IMGHDR_MAGIC        0x13026642  /* "Bf^B^S" */
-typedef struct {
-    unsigned long magic:32;
-    unsigned long major:4;
-    unsigned long minor:4;
-    unsigned long reserved:4;
-    unsigned long next_img_ver:4;
-    unsigned long cur_img_ver:4;
-    unsigned long hdr_len:4;
-    unsigned long image_id:8;
-    unsigned long image_len:32;
-    unsigned long image_crc:32;
-    unsigned long following_images:64;
-} boot_image_header_t;
 
 /* Program variables */
 const char *mmc_path = "/dev/mmcblk0";
@@ -496,6 +503,327 @@ void read_bootstream(const char *bootstream, const char *bootfile,
   free(buf);
 }
 
+// Get the version of hardware we're currently running on.
+// If it can't be found, this will return -1.
+int get_hw_version(void) {
+  const char *dmi_file = DMI_TABLE_PATH;
+
+  int dmi_fd = open(dmi_file, O_RDONLY);
+  if (dmi_fd < 0)
+    die("%s: %m", dmi_file);
+
+  struct stat st;
+  if (fstat(dmi_fd, &st) < 0)
+    die("%s: stat: %m", dmi_file);
+
+  void *dmi_buf = malloc(st.st_size);
+  if (dmi_buf == NULL)
+    die("out of memory");
+
+  int n_bytes = 0;
+  n_bytes = read_or_die(dmi_file, dmi_fd, dmi_buf, st.st_size);
+  if (n_bytes != st.st_size)
+    die("%s: could not read DMI table", dmi_file);
+
+  if (close(dmi_fd) < 0)
+    die("%s: close: %m", dmi_file);
+
+  // Now, skip along table until we reach the processor info
+  int bytes_left = st.st_size;
+  void *idx = dmi_buf;
+  uint8_t table_size = 0;
+
+  while (bytes_left > 0) {
+    uint8_t table_type = *((uint8_t*)idx);
+    table_size = *((uint8_t*)idx + 1);
+
+    // Break if we hit the processor table.
+    if (table_type == DMI_PROCESSOR_INFO_TYPE)
+      break;
+
+    // Otherwise, skip to next table.
+    idx += table_size;
+    bytes_left -= table_size;
+    
+    bool first_str = true;
+
+    // We might need to skip over strings, too.
+    while (bytes_left > 0) {
+      // If idx is over two 0 bytes, we're at the end, so
+      // advance to the next table.
+      if (*(uint16_t*)idx == 0) {
+        idx += sizeof(uint16_t);
+        bytes_left -= sizeof(uint16_t);
+        break;
+      } else {
+        // Skip a string. Note the first iteration will
+        // place the index at the beginning of the string,
+        // whereas all further iterations place the index at
+        // the NULL terminator.
+        if (!first_str) {
+          idx++;
+          bytes_left--;
+        }
+        first_str = false;
+        while (*(char*)idx && bytes_left > 0) {
+          idx++;
+          bytes_left--;
+        }
+      }
+    }
+  }
+
+  if (bytes_left <= 0) {
+    fprintf(stderr, "warning: could not find BlueField SoC revision\n");
+    free(dmi_buf);
+    return -1;
+  }
+
+  // Now idx is at processor version table - we can read the
+  // string now. SMBIOS tables append all strings to the end
+  // of the structure, and refer to them by their order.
+  // First string is 1, second is 2, etc.
+  uint8_t soc_ver_snum = *(uint8_t*)(idx + 0x10);
+  if (soc_ver_snum == 0) {
+    fprintf(stderr, "warning: found DMI processor ver field, but it's NULL\n");
+    free(dmi_buf);
+    return -1;
+  }
+
+  idx += table_size;
+  bytes_left -= table_size;
+
+  // Skip strings until we hit the desired one.
+  char version_string[DMI_PROCESSOR_VERSION_STR_MAX_SIZE] = {0};
+  bool first_str = true;
+  while (soc_ver_snum-- > 1 && bytes_left > 0) {
+    if (*(uint16_t*)idx == 0) {
+      fprintf(stderr, "warning: DMI processor ver specifies string that does not exist.\n");
+      free(dmi_buf);
+      return -1;
+    } else {
+      if (!first_str) {
+        idx++;
+        bytes_left--;
+      }
+      first_str = false;
+      // Skip a string.
+      while (*(char*)idx && bytes_left > 0) {
+        idx++;
+        bytes_left--;
+      }
+    }
+  }
+
+  idx++;
+  bytes_left--;
+
+  // Finally, actually copy the string.
+  strncpy(
+    version_string,
+    idx,
+    bytes_left < DMI_PROCESSOR_VERSION_STR_MAX_SIZE - 1 ? bytes_left : DMI_PROCESSOR_VERSION_STR_MAX_SIZE - 1
+  );
+
+  // Extract version
+  int version = -1;
+  if (1 != sscanf(version_string, "Mellanox BlueField-%d", &version))
+    fprintf(stderr, "warning: Unknown SoC revision");
+
+  // BlueField 1 is v0, BF2 is v1, etc.
+  version--;
+
+  free(dmi_buf);
+  return version;
+}
+
+// Read a header from a boot stream. This will consume the
+// entire header, verify it, and return the header
+// structure.
+size_t read_bootstream_header(const char *bootstream, int ifd, boot_image_header_t *hdr) {
+    int n;
+    uint64_t data;
+
+    // Read and verify the image header.
+    n = read_or_die(bootstream, ifd, hdr, sizeof(*hdr));
+    if (n != sizeof(*hdr))
+      die("Unable to read next header, n=%d", n);
+    n = hdr->hdr_len - sizeof(*hdr) / sizeof(uint64_t);
+    if (n < 0)
+      die("Invalid header length %d, n=%d", hdr->hdr_len, n);
+    // Drain the rest of header.
+    while (n--) {
+      if (read_or_die(bootstream, ifd, &data, sizeof(data)) != sizeof(data))
+        die("Not enough data for header");
+    }
+
+    return hdr->hdr_len * sizeof(uint64_t);
+}
+
+// Correct the following_images and next_img_ver fields in a BFB buffer.
+// Note this assumes a well-formed BFB stream in the buffer.
+void correct_bootstream_headers(void *buf, int num_images) {
+  uint64_t fi_map = 0;
+  void *idx = buf;
+  boot_image_header_t *hdr;
+  int img_size = 0;
+  int pad_size = 0;
+
+  if (num_images <= 0)
+    die("%s: num_images must be at least 1", __FUNCTION__);
+
+  // Markers to find images next time
+  void **images = malloc(num_images * sizeof(void*));
+  if (images == NULL)
+    die("out of memory");
+
+  // Iterate once to build fi_map and mark image starts
+  for (int i = 0; i < num_images; i++) {
+    hdr = (boot_image_header_t*) idx;
+
+    // Build image maps
+    fi_map |= 1UL << hdr->image_id;
+    images[i] = idx;
+
+    // Skip to next image
+    img_size = hdr->image_len;
+    pad_size = (img_size % 8) ? (8 - img_size % 8) : 0;
+    idx += img_size + pad_size + hdr->hdr_len * sizeof(uint64_t);
+  }
+
+  boot_image_header_t *prev_hdr;
+
+  // Now we can iterate over the images directly and fixup
+  // the fields that need it
+  for (int i = 0; i < num_images; i++) {
+    hdr = (boot_image_header_t*) images[i];
+
+    // Update image bitmap. Note that on the last
+    // image of a series of versions, this will be wrong,
+    // and will be corrected next iteration.
+    hdr->following_images = fi_map;
+
+    if (i > 0) {
+      prev_hdr = (boot_image_header_t*) images[i-1];
+
+      if (prev_hdr->image_id == hdr->image_id) {
+        // Update next_img_ver as long as we haven't gone to
+        // a new image ID.
+        prev_hdr->next_img_ver = hdr->cur_img_ver;
+      } else {
+        // If next image ID is different, then update
+        // fi_map, and correct the previous image.
+        fi_map &= ~(1UL << prev_hdr->image_id);
+        prev_hdr->following_images = fi_map;
+
+        // We also set prev_hdr's next_img_ver to 0 since
+        // there are no more images of that version.
+        prev_hdr->next_img_ver = 0;
+      }
+    }
+  }
+
+  // Edge case: Handle last image.
+  hdr = (boot_image_header_t*)images[num_images-1];
+  hdr->following_images = 0;
+  hdr->next_img_ver = 0;
+
+  free(images);
+}
+
+// Tell whether we should write an image to the boot
+// partition, based on a version number.
+// We do this conservatively, so we don't accidentally
+// filter out something common.
+bool should_install_image(boot_image_header_t *hdr, int version) {
+  // version < 0 indicates filtering should be off. All
+  // images will be installed in this case.
+  if (version < 0)
+    return true;
+
+  // For now, do not install anything that was introduced
+  // after the given version.
+  return hdr->cur_img_ver <= version;
+}
+
+// Read a bootstream to an internal buffer, optionally filtering out images
+// of a given version. Supply -1 to version to turn this behavior off.
+size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size, int version)
+{
+  int ifd = open(bootstream, O_RDONLY);
+  if (ifd < 0)
+    die("%s: %m", bootstream);
+
+  struct stat st;
+  if (fstat(ifd, &st) < 0)
+    die("%s: stat: %m", bootstream);
+
+  int bytes_left = st.st_size;
+
+  // If no version filtering requested and file is too large for the
+  // buffer, error out.
+  if (version < 0 && bytes_left > buf_size) {
+    die("%s: Boot stream file is too large", bootstream);
+  }
+
+  void *idx = buf; // Index along buffer
+  size_t n_bytes = 0;
+  boot_image_header_t hdr;
+  size_t hdr_size; // Size of the image header, including reserved words
+  size_t pad_size;
+  size_t img_size;
+
+  int num_images = 0;
+
+  // Otherwise, we'll need to read the whole file and filter it to tell
+  // whether stream will fit.
+  while (bytes_left > 0) {
+    hdr_size = read_bootstream_header(bootstream, ifd, &hdr);
+    bytes_left -= hdr_size;
+    img_size = hdr.image_len;
+
+    pad_size = (img_size % 8) ? (8 - img_size % 8) : 0;
+
+    // Check whether the version should be included.
+    if (should_install_image(&hdr, version)) {
+      // If so, copy the header and img into the buffer.
+      if ((hdr_size + idx) - buf > buf_size)
+        die("Boot stream file is too large");
+
+      memcpy(idx, &hdr, sizeof(hdr));
+      idx += hdr_size;
+
+      // Copy image into buffer.
+      if ((hdr.image_len + idx) - buf > buf_size)
+        die("Boot stream file is too large");
+
+      n_bytes = read_or_die(bootstream, ifd, idx, img_size + pad_size);
+      if (n_bytes != img_size + pad_size)
+        die("Unable to read next image, n=%d", n_bytes);
+
+      idx += n_bytes;
+      bytes_left -= n_bytes;
+
+      // Finally, count the image. We reuse this later for
+      // fixing up the headers.
+      num_images++;
+    } else {
+      // Otherwise, skip over the entire image.
+      n_bytes = lseek(ifd, img_size + pad_size, SEEK_CUR);
+      if (n_bytes < 0)
+        die("%s: Could not skip filtered image: %m", bootstream);
+      bytes_left -= img_size + pad_size;
+    }
+  }
+
+  if (close(ifd) < 0)
+    die("%s: close: %m", bootstream);
+
+  correct_bootstream_headers(buf, num_images);
+
+  return idx - buf;
+}
+
 void write_bootstream(const char *bootstream, const char *bootfile, int flags)
 {
   int sysfd = -1;
@@ -539,20 +867,16 @@ void write_bootstream(const char *bootstream, const char *bootfile, int flags)
   }
 
   // Copy the bootstream to the bootfile device
-  int ifd = open(bootstream, O_RDONLY);
-  if (ifd < 0)
-    die("%s: %m", bootstream);
+  void *ibuf = malloc(MMC_BOOT_PARTITION_MAX_SIZE);
+  void *inidx = ibuf;
+  uint8_t padbuf[8] = {0}; // There are at most 8 pad bytes.
+  if (ibuf == NULL)
+    die("out of memory");
+  int version = get_hw_version();
+  size_t bytes_left = read_bootstream_to_buffer(bootstream, ibuf, MMC_BOOT_PARTITION_MAX_SIZE, version);
   int ofd = open(bootfile, O_WRONLY | flags, 0666);
   if (ofd < 0)
     die("%s: %m", bootfile);
-  struct stat st;
-  if (fstat(ifd, &st) < 0)
-    die("%s: stat: %m", bootstream);
-  size_t bytes_left = st.st_size;
-
-  char *buf = malloc(MAX_SEG_LEN);
-  if (buf == NULL)
-    die("out of memory");
 
   // Write the bootstream header word first.  This has the byte to
   // be displayed in the rev_id register as the low 8 bits (zero for now).
@@ -571,16 +895,14 @@ void write_bootstream(const char *bootstream, const char *bootfile, int flags)
     write_or_die(bootfile, ofd, &segheader, sizeof(segheader));
 
     // Copy the segment plus any padding.
-    read_or_die(bootstream, ifd, buf, seg_size);
-    memset(buf + seg_size, 0, pad_size);
-    write_or_die(bootfile, ofd, buf, seg_size + pad_size);
+    write_or_die(bootfile, ofd, inidx, seg_size);
+    inidx += seg_size;
+    write_or_die(bootfile, ofd, padbuf, pad_size);
   }
 
-  if (close(ifd) < 0)
-    die("%s: close: %m", bootstream);
   if (close(ofd) < 0)
     die("%s: close: %m", bootfile);
-  free(buf);
+  free(ibuf);
 
   // Put back the force_ro setting if need be
   if (sysfd >= 0)
@@ -656,7 +978,7 @@ static uint32_t crc32_update(uint32_t crc, uint8_t *p, unsigned int len)
 
 static void verify_bootstream(const char *bootfile)
 {
-  int ifd, n, bytes_left, img_size;
+  int ifd, bytes_left, img_size;
   boot_image_header_t hdr;
   struct stat st;
   uint64_t data;
@@ -671,23 +993,13 @@ static void verify_bootstream(const char *bootfile)
   bytes_left = st.st_size;
   if (bytes_left % sizeof(uint64_t))
     die("Invalid size %d", bytes_left);
-  if (bytes_left > MMC_BOOT_PARTITION_MAX_SIZE)
-    die("Boot file size too big");
+  if (bytes_left > INPUT_BFB_MAX_SIZE)
+    die("Input boot file size too big");
 
   while (bytes_left > 0) {
-    // Read and verify the image header.
-    n = read_or_die(bootfile, ifd, &hdr, sizeof(hdr));
-    if (n != sizeof(hdr))
-      die("Unable to read next header, n=%d", n);
-    n = hdr.hdr_len - sizeof(hdr) / sizeof(uint64_t);
-    bytes_left -= hdr.hdr_len * sizeof(uint64_t);
-    if (n < 0 || bytes_left < 0)
+    bytes_left -= read_bootstream_header(bootfile, ifd, &hdr);
+    if (bytes_left < 0)
       die("Invalid header length");
-    // Drain the rest of header.
-    while (n--) {
-      if (read_or_die(bootfile, ifd, &data, sizeof(data)) != sizeof(data))
-        die("Not enough data for header");
-    }
 
     // Verify the image crc.
     crc = ~0;
