@@ -90,6 +90,8 @@ typedef struct {
     unsigned long following_images:64;
 } boot_image_header_t;
 
+ssize_t read_or_die(const char* filename, int fd, void* buf, size_t count);
+
 #ifndef OUTPUT_ONLY
 
 #include <linux/mmc/ioctl.h>
@@ -379,6 +381,142 @@ void show_status(void)
   printf("secure boot key free slots: %d\n", get_free_sbfuse_slots());
 }
 
+// Get the version of hardware we're currently running on.
+// If it can't be found, this will return -1.
+int get_hw_version(void) {
+  const char *dmi_file = DMI_TABLE_PATH;
+
+  int dmi_fd = open(dmi_file, O_RDONLY);
+  if (dmi_fd < 0) {
+    fprintf(stderr, "warn: %s: %m, disable version filtering\n", dmi_file);
+    return -1;
+  }
+
+  struct stat st;
+  if (fstat(dmi_fd, &st) < 0)
+    die("%s: stat: %m", dmi_file);
+
+  void *dmi_buf = malloc(st.st_size);
+  if (dmi_buf == NULL)
+    die("out of memory");
+
+  int n_bytes = 0;
+  n_bytes = read_or_die(dmi_file, dmi_fd, dmi_buf, st.st_size);
+  if (n_bytes != st.st_size)
+    die("%s: could not read DMI table", dmi_file);
+
+  if (close(dmi_fd) < 0)
+    die("%s: close: %m", dmi_file);
+
+  // Now, skip along table until we reach the processor info
+  int bytes_left = st.st_size;
+  void *idx = dmi_buf;
+  uint8_t table_size = 0;
+
+  while (bytes_left > 0) {
+    uint8_t table_type = *((uint8_t*)idx);
+    table_size = *((uint8_t*)idx + 1);
+
+    // Break if we hit the processor table.
+    if (table_type == DMI_PROCESSOR_INFO_TYPE)
+      break;
+
+    // Otherwise, skip to next table.
+    idx += table_size;
+    bytes_left -= table_size;
+
+    bool first_str = true;
+
+    // We might need to skip over strings, too.
+    while (bytes_left > 0) {
+      // If idx is over two 0 bytes, we're at the end, so
+      // advance to the next table.
+      if (*(uint16_t*)idx == 0) {
+        idx += sizeof(uint16_t);
+        bytes_left -= sizeof(uint16_t);
+        break;
+      } else {
+        // Skip a string. Note the first iteration will
+        // place the index at the beginning of the string,
+        // whereas all further iterations place the index at
+        // the NULL terminator.
+        if (!first_str) {
+          idx++;
+          bytes_left--;
+        }
+        first_str = false;
+        while (*(char*)idx && bytes_left > 0) {
+          idx++;
+          bytes_left--;
+        }
+      }
+    }
+  }
+
+  if (bytes_left <= 0) {
+    fprintf(stderr, "warning: could not find BlueField SoC revision\n");
+    free(dmi_buf);
+    return -1;
+  }
+
+  // Now idx is at processor version table - we can read the
+  // string now. SMBIOS tables append all strings to the end
+  // of the structure, and refer to them by their order.
+  // First string is 1, second is 2, etc.
+  uint8_t soc_ver_snum = *(uint8_t*)(idx + 0x10);
+  if (soc_ver_snum == 0) {
+    fprintf(stderr, "warning: found DMI processor ver field, but it's NULL\n");
+    free(dmi_buf);
+    return -1;
+  }
+
+  idx += table_size;
+  bytes_left -= table_size;
+
+  // Skip strings until we hit the desired one.
+  char version_string[DMI_PROCESSOR_VERSION_STR_MAX_SIZE] = {0};
+  bool first_str = true;
+  while (soc_ver_snum-- > 1 && bytes_left > 0) {
+    if (*(uint16_t*)idx == 0) {
+      fprintf(stderr, "warning: DMI processor ver specifies string that does not exist.\n");
+      free(dmi_buf);
+      return -1;
+    } else {
+      if (!first_str) {
+        idx++;
+        bytes_left--;
+      }
+      first_str = false;
+      // Skip a string.
+      while (*(char*)idx && bytes_left > 0) {
+        idx++;
+        bytes_left--;
+      }
+    }
+  }
+
+  idx++;
+  bytes_left--;
+
+  // Finally, actually copy the string.
+  strncpy(
+    version_string,
+    idx,
+    bytes_left < DMI_PROCESSOR_VERSION_STR_MAX_SIZE - 1 ? bytes_left : DMI_PROCESSOR_VERSION_STR_MAX_SIZE - 1
+  );
+
+  // Extract version
+  int version = -1;
+  if (1 != sscanf(version_string, "Mellanox BlueField-%d", &version))
+    fprintf(stderr, "warning: Unknown SoC revision");
+
+  // BlueField 1 is v0, BF2 is v1, etc.
+  version--;
+
+  free(dmi_buf);
+  return version;
+}
+
 #endif  // OUTPUT_ONLY
 
 // Read as much as possible despite EINTR or partial reads, and die on error.
@@ -501,142 +639,6 @@ void read_bootstream(const char *bootstream, const char *bootfile,
   if (close(ofd) < 0)
     die("%s: close: %m", bootfile);
   free(buf);
-}
-
-// Get the version of hardware we're currently running on.
-// If it can't be found, this will return -1.
-int get_hw_version(void) {
-  const char *dmi_file = DMI_TABLE_PATH;
-
-  int dmi_fd = open(dmi_file, O_RDONLY);
-  if (dmi_fd < 0) {
-    fprintf(stderr, "warn: %s: %m, disable version filtering\n", dmi_file);
-    return -1;
-  }
-
-  struct stat st;
-  if (fstat(dmi_fd, &st) < 0)
-    die("%s: stat: %m", dmi_file);
-
-  void *dmi_buf = malloc(st.st_size);
-  if (dmi_buf == NULL)
-    die("out of memory");
-
-  int n_bytes = 0;
-  n_bytes = read_or_die(dmi_file, dmi_fd, dmi_buf, st.st_size);
-  if (n_bytes != st.st_size)
-    die("%s: could not read DMI table", dmi_file);
-
-  if (close(dmi_fd) < 0)
-    die("%s: close: %m", dmi_file);
-
-  // Now, skip along table until we reach the processor info
-  int bytes_left = st.st_size;
-  void *idx = dmi_buf;
-  uint8_t table_size = 0;
-
-  while (bytes_left > 0) {
-    uint8_t table_type = *((uint8_t*)idx);
-    table_size = *((uint8_t*)idx + 1);
-
-    // Break if we hit the processor table.
-    if (table_type == DMI_PROCESSOR_INFO_TYPE)
-      break;
-
-    // Otherwise, skip to next table.
-    idx += table_size;
-    bytes_left -= table_size;
-    
-    bool first_str = true;
-
-    // We might need to skip over strings, too.
-    while (bytes_left > 0) {
-      // If idx is over two 0 bytes, we're at the end, so
-      // advance to the next table.
-      if (*(uint16_t*)idx == 0) {
-        idx += sizeof(uint16_t);
-        bytes_left -= sizeof(uint16_t);
-        break;
-      } else {
-        // Skip a string. Note the first iteration will
-        // place the index at the beginning of the string,
-        // whereas all further iterations place the index at
-        // the NULL terminator.
-        if (!first_str) {
-          idx++;
-          bytes_left--;
-        }
-        first_str = false;
-        while (*(char*)idx && bytes_left > 0) {
-          idx++;
-          bytes_left--;
-        }
-      }
-    }
-  }
-
-  if (bytes_left <= 0) {
-    fprintf(stderr, "warning: could not find BlueField SoC revision\n");
-    free(dmi_buf);
-    return -1;
-  }
-
-  // Now idx is at processor version table - we can read the
-  // string now. SMBIOS tables append all strings to the end
-  // of the structure, and refer to them by their order.
-  // First string is 1, second is 2, etc.
-  uint8_t soc_ver_snum = *(uint8_t*)(idx + 0x10);
-  if (soc_ver_snum == 0) {
-    fprintf(stderr, "warning: found DMI processor ver field, but it's NULL\n");
-    free(dmi_buf);
-    return -1;
-  }
-
-  idx += table_size;
-  bytes_left -= table_size;
-
-  // Skip strings until we hit the desired one.
-  char version_string[DMI_PROCESSOR_VERSION_STR_MAX_SIZE] = {0};
-  bool first_str = true;
-  while (soc_ver_snum-- > 1 && bytes_left > 0) {
-    if (*(uint16_t*)idx == 0) {
-      fprintf(stderr, "warning: DMI processor ver specifies string that does not exist.\n");
-      free(dmi_buf);
-      return -1;
-    } else {
-      if (!first_str) {
-        idx++;
-        bytes_left--;
-      }
-      first_str = false;
-      // Skip a string.
-      while (*(char*)idx && bytes_left > 0) {
-        idx++;
-        bytes_left--;
-      }
-    }
-  }
-
-  idx++;
-  bytes_left--;
-
-  // Finally, actually copy the string.
-  strncpy(
-    version_string,
-    idx,
-    bytes_left < DMI_PROCESSOR_VERSION_STR_MAX_SIZE - 1 ? bytes_left : DMI_PROCESSOR_VERSION_STR_MAX_SIZE - 1
-  );
-
-  // Extract version
-  int version = -1;
-  if (1 != sscanf(version_string, "Mellanox BlueField-%d", &version))
-    fprintf(stderr, "warning: Unknown SoC revision");
-
-  // BlueField 1 is v0, BF2 is v1, etc.
-  version--;
-
-  free(dmi_buf);
-  return version;
 }
 
 // Read a header from a boot stream. This will consume the
@@ -826,10 +828,11 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
   return idx - buf;
 }
 
-void write_bootstream(const char *bootstream, const char *bootfile, int flags)
+void write_bootstream(const char *bootstream, const char *bootfile, int flags, int version)
 {
   int sysfd = -1;
   char *sysname;
+  size_t ibuf_maxsize = INPUT_BFB_MAX_SIZE;
 
   // Reset the force_ro setting if need be
   if (strncmp(bootfile, "/dev/", 5) == 0)
@@ -866,16 +869,18 @@ void write_bootstream(const char *bootstream, const char *bootfile, int flags)
       free(sysname);
       sysname = NULL;
     }
+
+  // If writing to /dev/... assume it's an MMC partition
+  ibuf_maxsize = MMC_BOOT_PARTITION_MAX_SIZE;
   }
 
   // Copy the bootstream to the bootfile device
-  void *ibuf = malloc(MMC_BOOT_PARTITION_MAX_SIZE);
+  void *ibuf = malloc(ibuf_maxsize);
   void *inidx = ibuf;
   uint8_t padbuf[8] = {0}; // There are at most 8 pad bytes.
   if (ibuf == NULL)
     die("out of memory");
-  int version = get_hw_version();
-  size_t bytes_left = read_bootstream_to_buffer(bootstream, ibuf, MMC_BOOT_PARTITION_MAX_SIZE, version);
+  size_t bytes_left = read_bootstream_to_buffer(bootstream, ibuf, ibuf_maxsize, version);
   int ofd = open(bootfile, O_WRONLY | flags, 0666);
   if (ofd < 0)
     die("%s: %m", bootfile);
@@ -959,7 +964,7 @@ int main(int argc, char **argv)
   if (bootstream == NULL || output_file == NULL)
     die("mlx-bootctl: Must specify --output and --bootstream");
 
-  write_bootstream(bootstream, output_file, O_CREAT | O_TRUNC);
+  write_bootstream(bootstream, output_file, O_CREAT | O_TRUNC, -1);
   return 0;
 }
 
@@ -1031,15 +1036,17 @@ int main(int argc, char **argv)
     { "device", required_argument, NULL, 'd' },
     { "output", required_argument, NULL, 'o' },
     { "read", required_argument, NULL, 'r' },
+    { "version", required_argument, NULL, 'v' },
     { "help", no_argument, NULL, 'h' },
     { NULL, 0, NULL, 0 }
   };
-  static const char short_options[] = "sb:d:o:r:he";
+  static const char short_options[] = "sb:d:o:r:hev:";
   static const char help_text[] =
     "syntax: mlxbf-bootctl [--help|-h] [--swap|-s] [--device|-d MMCFILE]\n"
     "                      [--output|-o OUTPUT] [--read|-r INPUT]\n"
     "                      [--bootstream|-b BFBFILE] [--overwrite-current]\n"
-    "                      [--watchdog-swap interval | --nowatchdog-swap]";
+    "                      [--watchdog-swap interval | --nowatchdog-swap]\n"
+    "                      [--version|-v VERSION]";
 
   const char *watchdog_swap = NULL;
   const char *bootstream = NULL;
@@ -1047,6 +1054,8 @@ int main(int argc, char **argv)
   const char *input_file = NULL;
   bool watchdog_disable = false;
   bool swap = false;
+  bool auto_version = true;
+  int version_arg = -1;
   int which_boot = 1;   // alternate boot partition by default
   int opt;
 
@@ -1093,6 +1102,14 @@ int main(int argc, char **argv)
       enable_rst_n();
       break;
 
+    case 'v':
+      auto_version = false;
+      char *end;
+      version_arg = strtol(optarg, &end, 0);
+      if (end == optarg || *end != '\0')
+        die("version argument ('%s') must be an integer", optarg);
+      break;
+
     case 'h':
     default:
       die(help_text);
@@ -1116,7 +1133,8 @@ int main(int argc, char **argv)
     else if (output_file)
     {
       // Write the bootstream to the given file, creating it if needed
-      write_bootstream(bootstream, output_file, O_CREAT | O_TRUNC);
+      // Don't filter anything here, since we're not writing to EMMC.
+      write_bootstream(bootstream, output_file, O_CREAT | O_TRUNC, -1);
     }
     else
     {
@@ -1141,7 +1159,13 @@ int main(int argc, char **argv)
       if (asprintf(&bootfile, "%sboot%d", mmc_path, boot_part ^ which_boot) <= 0)
         die("unexpected failure in asprintf (%s/%d)", __FILE__, __LINE__);
 
-      write_bootstream(bootstream, bootfile, O_SYNC);
+      int version;
+      if (auto_version) {
+        version = get_hw_version();
+      } else {
+        version = version_arg;
+      }
+      write_bootstream(bootstream, bootfile, O_SYNC, version);
       // The eMMC driver works in an asynchronous way, thus any commands sent
       // should occur after the write to the bootstream has retired. Otherwise
       // a blk_update_request I/O error would be raised and the success of the

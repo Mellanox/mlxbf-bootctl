@@ -86,6 +86,18 @@ of boot partitions will happen.
 \-\-swap|\-s
 Set the boot software so that will swap the primary and alternate partitions
 at the next reset.
+.TP
+.B
+\-\-version|\-v
+Override automatic image version filtering. By default, when 
+.B \-v 
+is not specifed, image versions contained in the bootstream will not be
+installed to the boot partition if they are incompatible with the current
+BlueField platform.
+.B \-v
+allows you to manually specify the target version. Version 0 corresponds to BF-1,
+version 1 to BF-2, and so on. Version -1, or any version less than zero,
+will turn off image filtering entirely.
 .SH EXAMPLES
 To update to new firmware as safely as possible:
 .IP
