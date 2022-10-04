@@ -137,7 +137,7 @@ ssize_t read_or_die(const char* filename, int fd, void* buf, size_t count);
 #define EMMC_MIN_BOOT_SIZE 0x20000
 #define EMMC_BLOCK_SIZE 512
 
-#define SYS_PATH1 "/sys/bus/platform/drivers/mlx-bootctl"
+#define SYS_PATH1 "/sys/bus/platform/devices/MLNXBF04:00/driver"
 #define SYS_PATH2 "/sys/bus/platform/devices/MLNXBF04:00"
 #define SECOND_RESET_ACTION_PATH "second_reset_action"
 #define POST_RESET_WDOG_PATH "post_reset_wdog"
