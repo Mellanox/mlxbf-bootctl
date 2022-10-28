@@ -517,6 +517,14 @@ int get_hw_version(void) {
   return version;
 }
 
+#else
+
+/* Dummy max partition size for OUTPUT_ONLY */
+uint64_t get_boot_partition_size(void)
+{
+  return INPUT_BFB_MAX_SIZE;
+}
+
 #endif  // OUTPUT_ONLY
 
 // Read as much as possible despite EINTR or partial reads, and die on error.
@@ -870,8 +878,8 @@ void write_bootstream(const char *bootstream, const char *bootfile, int flags, i
       sysname = NULL;
     }
 
-  // If writing to /dev/... assume it's an MMC partition
-  ibuf_maxsize = MMC_BOOT_PARTITION_MAX_SIZE;
+    // If writing to /dev/... assume it's an MMC partition
+    ibuf_maxsize = get_boot_partition_size();
   }
 
   // Copy the bootstream to the bootfile device
@@ -1140,17 +1148,12 @@ int main(int argc, char **argv)
     {
       verify_bootstream(bootstream);
 
-      // Make sure the file will fit inside the boot partition
-      uint64_t boot_part_size = get_boot_partition_size();
       struct stat st;
       int error;
       error = stat(bootstream, &st);
 
       if (error < 0)
         die("%s: %m", bootstream);
-
-      if (st.st_size > boot_part_size)
-        die("Size of bootstream exceeds boot partition size");
 
       // Get the active partition and write to the appropriate *bootN file
       // Must save/restore boot partition, which I/O otherwise resets to zero.
@@ -1165,7 +1168,13 @@ int main(int argc, char **argv)
       } else {
         version = version_arg;
       }
+
+      // Note: There is no check to see if the image will fit in the
+      // boot partition in main(). This is because write_bootstream()
+      // may filter the contents of the stream, meaning the size check
+      // must be done in write_bootstream().
       write_bootstream(bootstream, bootfile, O_SYNC, version);
+
       // The eMMC driver works in an asynchronous way, thus any commands sent
       // should occur after the write to the bootstream has retired. Otherwise
       // a blk_update_request I/O error would be raised and the success of the
