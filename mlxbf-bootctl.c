@@ -59,6 +59,9 @@
 #define DMI_PROCESSOR_INFO_TYPE 4
 #define DMI_PROCESSOR_VERSION_STR_MAX_SIZE 100
 
+/* Other constants */
+#define MAX_VERSIONS_COUNT 256
+
 void die(const char* fmt, ...)
 {
   va_list ap;
@@ -747,16 +750,75 @@ void correct_bootstream_headers(void *buf, int num_images) {
 // partition, based on a version number.
 // We do this conservatively, so we don't accidentally
 // filter out something common.
-bool should_install_image(boot_image_header_t *hdr, int version) {
+bool should_install_image(boot_image_header_t *hdr, int version, uint8_t *max_versions) {
   // version < 0 indicates filtering should be off. All
   // images will be installed in this case.
   if (version < 0)
     return true;
 
-  // For now, do not install anything that was introduced
-  // after the given version.
-  return hdr->cur_img_ver <= version;
+  // If version filtering is on, check max_versions is valid
+  if (max_versions == NULL)
+    die("internal: max_versions is NULL");
+
+  bool should_not_install = (
+    // Do not install anything introduced after given version
+    hdr->cur_img_ver > version ||
+
+    // Otherwise, check for redundancy.
+    // If the img version isn't the max, it shouldn't be installed.
+    hdr->cur_img_ver < max_versions[hdr->image_id]
+  );
+
+  return !should_not_install;
 }
+
+// Find the maximum version image for each image ID.
+// max_versions must be a 256 element array. Each element of max_versions
+// corresponds to a maximum version: max_versions[img_id] = max_img_ver
+void find_max_versions(const char *bootstream, uint8_t *max_versions) {
+  if (max_versions == NULL)
+    die("%s: internal: max_versions is NULL", bootstream);
+
+  int ifd = open(bootstream, O_RDONLY);
+  if (ifd < 0)
+    die("%s: %m", bootstream);
+
+  struct stat st;
+  if (fstat(ifd, &st) < 0)
+    die("%s: stat: %m", bootstream);
+
+  int bytes_left = st.st_size;
+
+  // Initialize max_versions
+  memset (max_versions, 0, MAX_VERSIONS_COUNT * sizeof(uint8_t));
+
+  boot_image_header_t hdr;
+  size_t hdr_size;
+  size_t pad_size;
+  size_t img_size;
+  size_t n_bytes;
+
+  while (bytes_left > 0) {
+    hdr_size = read_bootstream_header(bootstream, ifd, &hdr);
+    bytes_left -= hdr_size;
+    img_size = hdr.image_len;
+
+    pad_size = (img_size % 8) ? (8 - img_size % 8) : 0;
+
+    // update max_versions if needed
+    if (hdr.cur_img_ver > max_versions[hdr.image_id])
+      max_versions[hdr.image_id] = hdr.cur_img_ver;
+
+    // Skip image
+    n_bytes = lseek(ifd, img_size + pad_size, SEEK_CUR);
+    if (n_bytes < 0)
+      die("%s: Could not skip filtered image: %m", bootstream);
+    bytes_left -= img_size + pad_size;
+  }
+
+  close (ifd);
+}
+
 
 // Read a bootstream to an internal buffer, optionally filtering out images
 // of a given version. Supply -1 to version to turn this behavior off.
@@ -778,6 +840,9 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
     die("%s: Boot stream file is too large", bootstream);
   }
 
+  uint8_t max_versions[MAX_VERSIONS_COUNT];
+  find_max_versions(bootstream, max_versions);
+
   void *idx = buf; // Index along buffer
   size_t n_bytes = 0;
   boot_image_header_t hdr;
@@ -797,7 +862,7 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
     pad_size = (img_size % 8) ? (8 - img_size % 8) : 0;
 
     // Check whether the version should be included.
-    if (should_install_image(&hdr, version)) {
+    if (should_install_image(&hdr, version, max_versions)) {
       // If so, copy the header and img into the buffer.
       if ((hdr_size + idx) - buf > buf_size)
         die("Boot stream file is too large");
