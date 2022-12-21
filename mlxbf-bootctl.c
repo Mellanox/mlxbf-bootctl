@@ -606,11 +606,6 @@ uint64_t get_segment_length(uint64_t segheader)
   return length;
 }
 
-bool validate_seg_header(uint64_t segheader)
-{
-  return (((segheader >> 29) & 0xfff8UL) == BOOT_FIFO_ADDR);
-}
-
 void read_bootstream(const char *bootstream, const char *bootfile,
                      uint64_t part_size)
 {
@@ -635,8 +630,6 @@ void read_bootstream(const char *bootstream, const char *bootfile,
   while (!(segheader & SEGMENT_IS_END))
   {
     read_or_die(bootfile, ifd, &segheader, sizeof(segheader));
-    if (!validate_seg_header(segheader))
-      die("Invalid segment header");
     uint64_t seg_size = get_segment_length(segheader);
     read_or_die(bootfile, ifd, buf, seg_size);
     write_or_die(bootstream, ofd, buf, seg_size);
