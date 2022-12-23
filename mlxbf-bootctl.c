@@ -744,6 +744,8 @@ void correct_bootstream_headers(void *buf, int num_images) {
 // We do this conservatively, so we don't accidentally
 // filter out something common.
 bool should_install_image(boot_image_header_t *hdr, int version, uint8_t *max_versions) {
+  bool install = false;
+
   // version < 0 indicates filtering should be off. All
   // images will be installed in this case.
   if (version < 0)
@@ -753,16 +755,19 @@ bool should_install_image(boot_image_header_t *hdr, int version, uint8_t *max_ve
   if (max_versions == NULL)
     die("internal: max_versions is NULL");
 
-  bool should_not_install = (
-    // Do not install anything introduced after given version
-    hdr->cur_img_ver > version ||
+  // The logic to decide what to install and what not to install
+  // is based on BlueField 1, 2, 3, <X> chips each possibly having
+  // their own version of a specific image while at the same time
+  // also using "shared" images.  A shared image is defined as an
+  // image with a version of 0 AND there are no other higher
+  // versions in the bootstream (i.e. images with a version > 0).
 
-    // Otherwise, check for redundancy.
-    // If the img version isn't the max, it shouldn't be installed.
-    hdr->cur_img_ver < max_versions[hdr->image_id]
-  );
+  // If the version matches OR the image is a shared image, install it.
+  if ((hdr->cur_img_ver == version) || (max_versions[hdr->image_id] == 0)) {
+    install = true;
+  }
 
-  return !should_not_install;
+  return install;
 }
 
 // Find the maximum version image for each image ID.
