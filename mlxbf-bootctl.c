@@ -59,6 +59,20 @@
 #define DMI_PROCESSOR_INFO_TYPE 4
 #define DMI_PROCESSOR_VERSION_STR_MAX_SIZE 100
 
+/* PSC APP image ID */
+#define PSC_APP_IMG_ID	39
+
+/* Record size of irot signature db. */
+#define PSC_APP_IROT_SIG_REC_LEN 104
+
+/* TLV based PSC APP sub-image header. */
+typedef struct  __attribute__((__packed__)) {
+#define PSC_APP_TYPE_IROT_SIGNATURE_DB 0x1
+  uint8_t type;           /* sub-image type */
+  uint32_t length;        /* sub-image payload length */
+  uint8_t unused[3];
+} psc_app_img_hdr_t;
+
 /* Other constants */
 #define MAX_VERSIONS_COUNT 256
 
@@ -149,6 +163,10 @@ ssize_t read_or_die(const char* filename, int fd, void* buf, size_t count);
 
 /* Program variables */
 const char *mmc_path = "/dev/mmcblk0";
+
+/* PSC cert update filtering info */
+static uint8_t psc_cert_update;    /* whether cert need update. */
+static uint64_t psc_cert_key;      /* cert signature lookup key */
 
 /* Run an MMC_IOC_CMD ioctl on mmc_path */
 void mmc_command(struct mmc_ioc_cmd *idata)
@@ -520,6 +538,121 @@ int get_hw_version(void) {
   return version;
 }
 
+/* Find substring within a buffer. */
+static char* find_str(char *buf, int buf_len, const char *str)
+{
+  int len;
+  char *p = buf, *find;
+
+  while ((p - buf) < buf_len) {
+    len = strlen(p);
+    find = strstr(p, str);
+    if (find)
+      return find;
+    p += len + 1;
+  }
+
+  return NULL;
+}
+
+/*
+ * Handle the IROT signature DB and returns the offset of the record which
+ * matches the key 'psc_cert_key', or return value < 0 in case of error case
+ * or not found.
+ */
+static int handle_irot_sig_db(uint8_t *buf, uint32_t buf_len)
+{
+	uint32_t idx0, idx1, idx;
+	uint64_t data64;
+
+        /* Ignore sig db if not patch is needed. */
+	if (!psc_cert_update)
+		return -1;
+
+	/* Sanity check. */
+	if (buf_len % PSC_APP_IROT_SIG_REC_LEN)
+		return -EINVAL;
+
+	/* Binary search on the sorted records within range [idx0, idx1]. */
+	idx0 = 0;
+	idx1 = buf_len / PSC_APP_IROT_SIG_REC_LEN - 1;
+
+        /* Binary search to find the record. */
+	for(;;) {
+		idx = (idx0 + idx1) / 2;
+		data64 = *(uint64_t *)(buf + idx * PSC_APP_IROT_SIG_REC_LEN);
+		if (data64 < psc_cert_key) {
+			if (idx0 == idx)
+				break;
+			else
+				idx0 = idx;
+		} else if (data64 == psc_cert_key) {
+			break;
+		} else {
+			if (idx1 == idx)
+				break;
+			else
+				idx1 = idx;
+		}
+	}
+
+	return (data64 == psc_cert_key) ? idx : -1;
+}
+
+/*
+ * Filter the PSC APP image.
+ * For the IROT signature DB, only up to one record is needed if matching the
+ * lookup key.
+ */
+size_t filter_psc_app_image(void *image, size_t img_size)
+{
+  psc_app_img_hdr_t *hdr;
+  size_t adjust_len = 0, len = 0;
+  int idx;
+
+  while (len < img_size) {
+    hdr = (psc_app_img_hdr_t *)(image + len);
+
+    if (len + sizeof(*hdr) + hdr->length > img_size)
+      die("corrupted image\n");
+
+    if (len != adjust_len) {
+      memmove(image + adjust_len, image + len, sizeof(*hdr) + hdr->length);
+      hdr = (psc_app_img_hdr_t *)(image + adjust_len);
+    }
+
+    len += sizeof(*hdr) + hdr->length;
+
+    if (hdr->type != PSC_APP_TYPE_IROT_SIGNATURE_DB) {
+      adjust_len += sizeof(*hdr) + hdr->length;
+      continue;
+    }
+
+    idx = handle_irot_sig_db((uint8_t *)&hdr[1], hdr->length);
+    if (idx >= 0) {
+      memmove((uint8_t *)hdr + sizeof(*hdr),
+              (uint8_t *)hdr + sizeof(*hdr) + idx, PSC_APP_IROT_SIG_REC_LEN);
+      hdr->length = PSC_APP_IROT_SIG_REC_LEN - sizeof(*hdr);
+      adjust_len += PSC_APP_IROT_SIG_REC_LEN;
+    }
+  }
+
+  return adjust_len;
+}
+
+static uint32_t crc32_update(uint32_t crc, uint8_t *p, unsigned int len)
+{
+  int i;
+
+  while (len--) {
+    crc ^= *p++;
+    for (i = 0; i < 8; i++)
+      crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+  }
+
+  return crc;
+}
+
 #else
 
 /* Dummy max partition size for OUTPUT_ONLY */
@@ -817,7 +950,6 @@ void find_max_versions(const char *bootstream, uint8_t *max_versions) {
   close (ifd);
 }
 
-
 // Read a bootstream to an internal buffer, optionally filtering out images
 // of a given version. Supply -1 to version to turn this behavior off.
 size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size, int version)
@@ -842,7 +974,7 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
   find_max_versions(bootstream, max_versions);
 
   void *idx = buf; // Index along buffer
-  size_t n_bytes = 0;
+  size_t n_bytes = 0, n_bytes_adjust = 0;
   boot_image_header_t hdr;
   size_t hdr_size; // Size of the image header, including reserved words
   size_t pad_size;
@@ -876,7 +1008,19 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
       if (n_bytes != img_size + pad_size)
         die("Unable to read next image, n=%d", n_bytes);
 
-      idx += n_bytes;
+      n_bytes_adjust = n_bytes;
+#ifndef OUTPUT_ONLY
+      if (hdr.image_id == PSC_APP_IMG_ID) {
+        // Update image len and CRC for trimmed image.
+        n_bytes_adjust = filter_psc_app_image(idx, img_size);
+        boot_image_header_t *cur_hdr =
+            (boot_image_header_t *)(idx - sizeof(hdr));
+        cur_hdr->image_len = n_bytes_adjust;
+        cur_hdr->image_crc = ~crc32_update(~0, idx, n_bytes_adjust);
+      }
+#endif
+
+      idx += n_bytes_adjust;
       bytes_left -= n_bytes;
 
       // Finally, count the image. We reuse this later for
@@ -899,11 +1043,67 @@ size_t read_bootstream_to_buffer(const char *bootstream, void *buf, int buf_size
   return idx - buf;
 }
 
+/*
+ * Get the filtering information from ACPI, which has the
+ * irot-cert-update: L4 IROT cert needs to be updated.
+ * irot-cert-key: L4 IROT cert signature lookup key.
+ */
+static void get_psc_app_filter_info(void)
+{
+#ifndef OUTPUT_ONLY
+  char path[] = "/sys/firmware/acpi/tables/SSDT1";
+  struct stat st;
+  int i, fd;
+  char *buf = NULL, *p;
+
+  /* Support SSDT[1~9] */
+  for (i = 1; i <= 9; i++) {
+    path[strlen(path) - 1] = '0' + i;
+    fd = open(path, O_RDONLY);
+    if (fd == -1)
+      break;
+
+    // Get size
+    if (fstat(fd, &st) < 0)
+      die("%s: stat: %m", path);
+
+    // Allocate memory and read the file.
+    if (buf)
+      free(buf);
+    buf = malloc(st.st_size + 1);
+    if (!buf)
+      die("fail to alloc buf: %m");
+    buf[st.st_size] = 0;
+    if (read(fd, buf, st.st_size) != st.st_size)
+      die("%s: read %m", path);
+
+    close(fd);
+
+    p = find_str(buf, st.st_size, "irot-cert-key");
+    if (!p)
+      continue;
+    memcpy(&psc_cert_key, p + strlen("irot-cert-key") + 2, sizeof(uint64_t));
+
+    p = find_str(buf, st.st_size, "irot-cert-update");
+    if (!p)
+      break;
+    memcpy(&psc_cert_update, p + strlen("irot-cert-update") + 2, sizeof(uint8_t));
+
+    break;
+  }
+
+  if (buf)
+    free(buf);
+#endif
+}
+
 void write_bootstream(const char *bootstream, const char *bootfile, int flags, int version)
 {
   int sysfd = -1;
   char *sysname;
   size_t ibuf_maxsize = INPUT_BFB_MAX_SIZE;
+
+  get_psc_app_filter_info();
 
   // Reset the force_ro setting if need be
   if (strncmp(bootfile, "/dev/", 5) == 0)
@@ -1040,19 +1240,6 @@ int main(int argc, char **argv)
 }
 
 #else
-
-static uint32_t crc32_update(uint32_t crc, uint8_t *p, unsigned int len)
-{
-  int i;
-
-  while (len--) {
-    crc ^= *p++;
-    for (i = 0; i < 8; i++)
-      crc = (crc >> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
-  }
-
-  return crc;
-}
 
 static void verify_bootstream(const char *bootfile)
 {
