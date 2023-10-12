@@ -630,10 +630,11 @@ size_t filter_psc_app_image(void *image, size_t img_size)
 
     idx = handle_irot_sig_db((uint8_t *)&hdr[1], hdr->length);
     if (idx >= 0) {
-      memmove((uint8_t *)hdr + sizeof(*hdr),
-              (uint8_t *)hdr + sizeof(*hdr) + idx, PSC_APP_IROT_SIG_REC_LEN);
-      hdr->length = PSC_APP_IROT_SIG_REC_LEN - sizeof(*hdr);
-      adjust_len += PSC_APP_IROT_SIG_REC_LEN;
+      memmove((uint8_t *)&hdr[1],
+              (uint8_t *)&hdr[1] + idx * PSC_APP_IROT_SIG_REC_LEN,
+              PSC_APP_IROT_SIG_REC_LEN);
+      hdr->length = PSC_APP_IROT_SIG_REC_LEN;
+      adjust_len += sizeof(*hdr) + PSC_APP_IROT_SIG_REC_LEN;
     }
   }
 
