@@ -1075,8 +1075,8 @@ static void get_psc_app_filter_info(void)
     if (!buf)
       die("fail to alloc buf: %m");
     buf[st.st_size] = 0;
-    if (read(fd, buf, st.st_size) != st.st_size)
-      die("%s: read %m", path);
+    if (read_or_die(path, fd, buf, st.st_size) != st.st_size)
+      die("%s: unexpected read", path);
 
     close(fd);
 
