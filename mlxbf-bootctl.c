@@ -889,8 +889,10 @@ bool should_install_image(boot_image_header_t *hdr, int version, uint8_t *max_ve
   if (max_versions == NULL)
     die("internal: max_versions is NULL");
 
+#ifndef OUTPUT_ONLY
   if ((hdr->image_id == PSC_APP_IMG_ID) && !psc_cert_update)
     return false;
+#endif
 
   // The logic to decide what to install and what not to install
   // is based on BlueField 1, 2, 3, <X> chips each possibly having
