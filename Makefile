@@ -29,7 +29,7 @@ mlxbf-bootctl: $(SOURCES:.c=.o)
 
 all: mlxbf-bootctl
 
-install::
+install: mlxbf-bootctl
 	mkdir -p $(DESTDIR)$(SBINDIR)
 	cp -f mlxbf-bootctl $(DESTDIR)$(SBINDIR)
 
