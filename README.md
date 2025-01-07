@@ -114,6 +114,24 @@ The mlxbf-bootctl syntax is as follows:
 
   --nowatchdog-swap: Ensure that after the next reset, no watchdog
     will be started, and no swapping of boot partitions will happen.
+
+  --watchdog-boot-mode: Set the watchdog boot mode. This will take effect
+    on the next boot and start the watchdog with a countdown interval set
+    by --watchdog-boot-interval or a default value if no interval is set.
+    This setting will be overridden for the first boot if the watchdog is
+    being used for boot swap (--watchdog-swap). Boot modes are: 'disabled',
+    'standard', and 'time_limit'. In 'disabled' mode the watchdog will not be
+    started on the next boot unless it is used for boot swap. In 'standard' mode
+    the watchdog will be started on next boot and will be refreshed automatically
+    during boot (used to recover from hangs). In 'time_limit' mode the watchdog
+    will be started on next boot, but never refreshed until boot finishes
+    (used to enforce total boot time).
+
+  --watchdog-boot-interval: Set the watchdog interval that will be used when
+    starting the watchdog on the next boot (configured with --watchdog-swap or
+    --watchdog--boot-mode). This is also known as the watchdog countdown or
+    timeout value given in seconds.
+
 ```
 
 Updating the Boot Partition
