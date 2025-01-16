@@ -349,7 +349,7 @@ FILE *open_sysfs(const char *name, const char *attr)
 
 bf_boot_watchdog_config_t get_watchdog_config(void)
 {
-  bf_boot_watchdog_config_t watchdog_config;
+  bf_boot_watchdog_config_t watchdog_config = {.word = 0};
   FILE *f = open_sysfs(POST_RESET_WDOG_PATH, "r");
 
   if (fscanf(f, "%d", (int *) &watchdog_config.word) != 1)
@@ -371,17 +371,17 @@ const char *get_watchdog_mode_str(uint8_t watchdog_mode)
 void set_watchdog(uint16_t interval, uint8_t mode)
 {
   FILE *f = NULL;
-  bf_boot_watchdog_config_t watchdog_config;
+  bf_boot_watchdog_config_t watchdog_config = {.word = 0};
 
   if (mode > BF_BOOT_WDOG_MODE_MAX) {
     die("Watchdog mode '%d' is unsupported.", mode);
   }
 
-  if (interval != 0 && interval < MIN_WDOG_INTERVAL_SEC) {
+  if (interval == 0) {
+    mode = BF_BOOT_WDOG_MODE_DISABLED;
+  } else if (interval < MIN_WDOG_INTERVAL_SEC) {
     die("Watchdog interval '%d' is too small (must be >= %ds).", interval, MIN_WDOG_INTERVAL_SEC);
-  }
-
-  if (interval > MAX_WDOG_INTERVAL_SEC) {
+  } else if (interval > MAX_WDOG_INTERVAL_SEC) {
     die("Watchdog interval '%d' is too large (must be < %ds).", interval, MAX_WDOG_INTERVAL_SEC);
   }
 
@@ -1561,9 +1561,11 @@ int main(int argc, char **argv)
     if (end == watchdog_interval_str || *end != '\0')
       die("watchdog interval ('%s') must be an integer", watchdog_interval_str);
 
-    if (watchdog_interval < MIN_WDOG_INTERVAL_SEC || watchdog_interval > MAX_WDOG_INTERVAL_SEC)
+    if (watchdog_interval != 0 &&
+      (watchdog_interval < MIN_WDOG_INTERVAL_SEC || watchdog_interval > MAX_WDOG_INTERVAL_SEC)) {
       die("watchdog interval ('%s') must be between %d-%d",
           watchdog_interval_str, MIN_WDOG_INTERVAL_SEC, MAX_WDOG_INTERVAL_SEC);
+    }
   }
 
   // Swap eMMC on reset after watchdog interval
