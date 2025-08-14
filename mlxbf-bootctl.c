@@ -411,6 +411,74 @@ void set_second_reset_action(const char *action)
   fclose(f);
 }
 
+void configure_watchdog(bool watchdog_swap, bool nowatchdog_swap,
+                        const char *watchdog_mode_str, const char *watchdog_interval_str)
+{
+  int watchdog_interval = DEFAULT_WDOG_INTERVAL_SEC;
+  int watchdog_mode = BF_BOOT_WDOG_MODE_DISABLED;
+  char *end;
+
+  if (watchdog_swap && nowatchdog_swap)
+    die("--watchdog-swap cannot be used with --nowatchdog-swap or --watchdog-boot params.");
+
+  if (watchdog_interval_str != NULL)
+  {
+    if (!watchdog_mode_str && !watchdog_swap)
+      die("--watchdog-boot-interval requires --watchdog-boot-mode.");
+
+    watchdog_interval = strtol(watchdog_interval_str, &end, 0);
+    if (end == watchdog_interval_str || *end != '\0')
+      die("watchdog interval ('%s') must be an integer", watchdog_interval_str);
+
+    if (watchdog_interval != 0 &&
+      (watchdog_interval < MIN_WDOG_INTERVAL_SEC || watchdog_interval > MAX_WDOG_INTERVAL_SEC)) {
+      die("watchdog interval ('%s') must be between %d-%d",
+          watchdog_interval_str, MIN_WDOG_INTERVAL_SEC, MAX_WDOG_INTERVAL_SEC);
+    }
+  }
+
+  if (watchdog_mode_str != NULL)
+  {
+    if (strcmp(watchdog_mode_str,
+               bf_boot_wdog_mode_str[BF_BOOT_WDOG_MODE_DISABLED]) == 0) {
+      watchdog_mode = BF_BOOT_WDOG_MODE_DISABLED;
+    } else if (strcmp(watchdog_mode_str,
+                      bf_boot_wdog_mode_str[BF_BOOT_WDOG_MODE_STANDARD]) == 0) {
+      watchdog_mode = BF_BOOT_WDOG_MODE_STANDARD;
+    } else if (strcmp(watchdog_mode_str,
+                      bf_boot_wdog_mode_str[BF_BOOT_WDOG_MODE_TIME_LIMIT]) == 0) {
+      watchdog_mode = BF_BOOT_WDOG_MODE_TIME_LIMIT;
+    } else {
+      die("Invalid watchdog mode '%s'", watchdog_mode_str);
+    }
+  }
+
+  // Swap eMMC on reset after watchdog interval.
+  if (watchdog_swap)
+  {
+    // Ensure watchdog mode 0 is always used for boot swap so
+    // this command is still compatible with older ATF versions.
+    // The watchdog will be enabled for the next boot, but then
+    // disabled for all future boots after that.
+    set_watchdog(watchdog_interval, BF_BOOT_WDOG_MODE_DISABLED);
+    set_second_reset_action("swap_emmc");
+    enable_rst_n();
+    return;
+  }
+
+  if (nowatchdog_swap)
+  {
+    // Disable second reset action (watchdog-swap behavior)
+    set_second_reset_action("none");
+  }
+
+  if (watchdog_mode == BF_BOOT_WDOG_MODE_DISABLED) {
+    watchdog_interval = 0;
+  }
+
+  set_watchdog(watchdog_interval, watchdog_mode);
+}
+
 // Return the (malloced) string describing the lifecycle state (w line return)
 char *get_lifecycle_state(void)
 {
@@ -1409,8 +1477,6 @@ int main(int argc, char **argv)
   int version_arg = -1;
   int which_boot = 1;   // alternate boot partition by default
   int opt;
-  int watchdog_mode = 0;
-  int watchdog_interval = DEFAULT_WDOG_INTERVAL_SEC;
 
   while ((opt = getopt_long(argc, argv, short_options, long_options, NULL))
          != -1)
@@ -1424,11 +1490,9 @@ int main(int argc, char **argv)
     case 'w':
       watchdog_interval_str = optarg;
       watchdog_swap = true;
-      nowatchdog_swap = false;
       break;
 
     case 'n':
-      watchdog_swap = false;
       nowatchdog_swap = true;
       break;
 
@@ -1441,6 +1505,7 @@ int main(int argc, char **argv)
 
     case 'i':
       watchdog_interval_str = optarg;
+      nowatchdog_swap = true;
       if (get_hw_version() != BF3_VERSION)
         die("'--watchdog-boot-interval' is only supported on Bluefield 3");
       break;
@@ -1550,61 +1615,8 @@ int main(int argc, char **argv)
   if (swap)
     set_boot_partition(get_boot_partition() ^ 1);
 
-  if (watchdog_interval_str != NULL)
-  {
-    char *end;
-
-    if (!watchdog_mode_str && !watchdog_swap)
-      die("--watchdog-boot-interval requires --watchdog-boot-mode or --watchdog-swap.");
-
-    watchdog_interval = strtol(watchdog_interval_str, &end, 0);
-    if (end == watchdog_interval_str || *end != '\0')
-      die("watchdog interval ('%s') must be an integer", watchdog_interval_str);
-
-    if (watchdog_interval != 0 &&
-      (watchdog_interval < MIN_WDOG_INTERVAL_SEC || watchdog_interval > MAX_WDOG_INTERVAL_SEC)) {
-      die("watchdog interval ('%s') must be between %d-%d",
-          watchdog_interval_str, MIN_WDOG_INTERVAL_SEC, MAX_WDOG_INTERVAL_SEC);
-    }
-  }
-
-  // Swap eMMC on reset after watchdog interval
-  if (watchdog_swap)
-  {
-    // Ensure watchdog mode 0 is always used for boot swap so
-    // this command is still compatible with older ATF versions.
-    // The watchdog will be enabled for the next boot, but then
-    // disabled for all future boots after that.
-    set_watchdog(watchdog_interval, BF_BOOT_WDOG_MODE_DISABLED);
-    set_second_reset_action("swap_emmc");
-    enable_rst_n();
-  }
-
-  if (nowatchdog_swap)
-  {
-    // Disable reset watchdog and don't adjust reset actions at reset time
-    set_watchdog(0, BF_BOOT_WDOG_MODE_DISABLED);
-    set_second_reset_action("none");
-  }
-
-  if (watchdog_mode_str != NULL)
-  {
-    if (strcmp(watchdog_mode_str,
-               bf_boot_wdog_mode_str[BF_BOOT_WDOG_MODE_DISABLED]) == 0) {
-      watchdog_interval = 0;
-      watchdog_mode = BF_BOOT_WDOG_MODE_DISABLED;
-    } else if (strcmp(watchdog_mode_str,
-                      bf_boot_wdog_mode_str[BF_BOOT_WDOG_MODE_STANDARD]) == 0) {
-      watchdog_mode = BF_BOOT_WDOG_MODE_STANDARD;
-    } else if (strcmp(watchdog_mode_str,
-                      bf_boot_wdog_mode_str[BF_BOOT_WDOG_MODE_TIME_LIMIT]) == 0) {
-      watchdog_mode = BF_BOOT_WDOG_MODE_TIME_LIMIT;
-    } else {
-      die("Invalid watchdog mode '%s'", watchdog_mode_str);
-    }
-    set_watchdog(watchdog_interval, watchdog_mode);
-  }
-
+  configure_watchdog(watchdog_swap, nowatchdog_swap,
+                     watchdog_mode_str, watchdog_interval_str);
   return 0;
 }
 
