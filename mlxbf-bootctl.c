@@ -200,6 +200,7 @@ ssize_t read_or_die(const char* filename, int fd, void* buf, size_t count);
 
 /* Program variables */
 const char *mmc_path = "/dev/mmcblk0";
+const char *acpi_tables = " /sys/firmware/acpi/tables/DSDT";
 
 /* PSC cert update filtering info */
 static uint8_t psc_cert_update;    /* whether cert need update. */
@@ -1449,6 +1450,36 @@ static void verify_bootstream(const char *bootfile)
   close(ifd);
 }
 
+static bool is_BF4 (void)
+{
+  FILE *fp;
+  char *buf;
+  long size;
+  int found = 0;
+
+  fp = fopen("/sys/firmware/acpi/tables/DSDT", "rb");
+
+  if (fp)
+  {
+    fseek(fp, 0, SEEK_END);
+    size = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+
+    buf = malloc(size);
+    if (!buf) {
+      fclose(fp);
+      return 1;
+    }
+
+    if (fread(buf, 1, size, fp) == (size_t)size)
+      found = (memmem(buf, size, "TH500", 5) != NULL);
+
+    free(buf);
+    fclose(fp);
+  }
+  return found;
+}
+
 int main(int argc, char **argv)
 {
   static struct option long_options[] = {
@@ -1489,6 +1520,10 @@ int main(int argc, char **argv)
   int version_arg = -1;
   int which_boot = 1;   // alternate boot partition by default
   int opt;
+
+  if (is_BF4()) {
+    die("mlxbf-bootctl is NOT supported on Bluefield 4");
+  }
 
   while ((opt = getopt_long(argc, argv, short_options, long_options, NULL))
          != -1)
